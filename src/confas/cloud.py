@@ -26,18 +26,43 @@ per-pair median latencies and arm sample counts. **No file names, no paths, no
 content.** Opt-in: if ``cloud_sync`` is off (the default) nothing leaves the
 machine. Conflicts never corrupt anything: every state carries a Lamport clock
 and merges take element-wise maxima / weighted averages.
+
+Security model (defence in depth)
+---------------------------------
+1. Transport: HTTPS only (allow-listed schemes), TLS certificate verification
+   always on (urllib default context; no way to disable it here).
+2. Credentials: the GitHub PAT lives in ``CONFAS_CLOUD_TOKEN`` or
+   ``~/.confas/cloud_token`` (chmod 0600 on write). It can ONLY create/update
+   gists - never repos, code, packages or user data. Users should supply their
+   own token; the tool never sends it anywhere except api.github.com.
+3. Trust boundary for DOWNLOADED state: a pooled model could be poisoned by a
+   malicious contributor or a compromised endpoint. Mitigations:
+   * hard size caps (max bytes per response, max arms, max samples/arm);
+   * full structural validation of every remote arm (shape/finiteness/
+     symmetry/PSD) inside ``_LinearBandit.import_state`` - garbage is dropped;
+   * numeric sanity bounds on latencies and rewards at merge & pull time;
+   * ML is an optimiser, NEVER a correctness gate: every conversion still runs
+     through the curated fallback chains, so even a perfectly poisoned model
+     cannot produce a wrong file - only a slower route.
+4. Local bandit learning is untouched by sync failures: any exception during
+   pull/push is swallowed and logged; conversions keep working offline.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import os
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger("confas.cloud")
 
 try:
     import numpy as np
@@ -46,6 +71,21 @@ except Exception:  # pragma: no cover
 
 DEFAULT_GIST_ID = "REPLACE_WITH_YOUR_GIST_ID"
 API_ROOT = "https://api.github.com"
+
+# ---- security limits --------------------------------------------------------
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024      # 2 MiB cap on any downloaded state
+MAX_CONTRIB_BYTES = 512 * 1024            # skip absurdly large contrib files
+MAX_LATENCY_MS = 86_400_000.0             # > 24 h is nonsense -> reject
+ALLOWED_SCHEMES = ("https",)              # plaintext upload is forbidden
+
+
+def _check_url(url: str) -> bool:
+    """Reject anything that is not a clean https URL (SSRF/plaintext guard)."""
+    try:
+        p = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return p.scheme in ALLOWED_SCHEMES and bool(p.netloc) and "\n" not in url
 
 
 # --------------------------------------------------------------------------- #
@@ -78,12 +118,30 @@ def token() -> str:
     return t
 
 
+def save_token(t: str) -> Path:
+    """Persist the user's gist token locally with owner-only permissions."""
+    d = _data_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / "cloud_token"
+    try:
+        os.chmod(f, 0o600)              # pre-chmod before content lands (best effort)
+    except OSError:
+        pass
+    fd = os.open(str(f), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(t.strip())
+    return f
+
+
 # --------------------------------------------------------------------------- #
 #  transport (urllib - no extra dependency inside the frozen EXE)
 # --------------------------------------------------------------------------- #
 
 def _request(url: str, method: str = "GET", body: Optional[dict] = None,
              headers: Optional[dict] = None, timeout: int = 15) -> Optional[dict]:
+    if not _check_url(url):
+        log.warning("blocked non-https request to %r", url[:100])
+        return None
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("User-Agent", "ConFas/CloudSync")
@@ -91,17 +149,34 @@ def _request(url: str, method: str = "GET", body: Optional[dict] = None,
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:
+        # default SSL context => TLS with full certificate verification.
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8")
-            return json.loads(raw) if raw.strip() else {}
+            raw = resp.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                log.warning("response from %s exceeds size cap - discarded", url[:100])
+                return None
+            text = raw.decode("utf-8")
+            return json.loads(text) if text.strip() else {}
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
-            json.JSONDecodeError, OSError):
+            json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+        log.debug("cloud request failed (%s %s): %s", method, url[:100], exc)
         return None
 
 
 # --------------------------------------------------------------------------- #
 #  merge logic (pure-python + numpy, safe on client AND in CI)
 # --------------------------------------------------------------------------- #
+
+def _clean_reward(v) -> float:
+    """Clamp a remote reward vector into the sane [-1, 1] bandit range."""
+    try:
+        arr = np.array(v, dtype=float)
+    except Exception:
+        return None
+    if arr.size == 0 or not np.all(np.isfinite(arr)):
+        return None
+    return np.clip(arr, -1.0, 1.0)
+
 
 def merge_states(states: list[dict]) -> dict:
     """Merge contributor states into one pooled state.
@@ -111,6 +186,9 @@ def merge_states(states: list[dict]) -> dict:
       proper prior scale), b vectors summed (rewards accumulate), n summed.
     * ``median_ms``: minimum observed latency wins (best-case speed knowledge).
     * ``clock``: max + 1 (Lamport).
+    Security: every remote number is validated/bounded here; nonsense (NaN,
+    negative counts, absurd latencies, >24h timings, oversized payloads) is
+    dropped arm-by-arm instead of poisoning the pool.
     """
     bandit: dict[str, dict] = {}
     medians: dict[str, float] = {}
@@ -118,24 +196,39 @@ def merge_states(states: list[dict]) -> dict:
     for st in states:
         if not isinstance(st, dict):
             continue
-        clock = max(clock, int(st.get("clock", 0)))
-        for arm, s in (st.get("bandit") or {}).items():
-            d = bandit.setdefault(arm, {"A_sum": None, "nA": 0, "b_sum": None, "n": 0})
+        try:
+            clock = max(clock, min(int(st.get("clock", 0)), 10 ** 9))
+        except (TypeError, ValueError):
+            pass
+        arms = st.get("bandit") or {}
+        if not isinstance(arms, dict):
+            continue
+        for arm, s in list(arms.items())[:512]:
+            if not isinstance(arm, str) or len(arm) > 128 or not isinstance(s, dict):
+                continue
             try:
                 A = np.array(s["A"], dtype=float)
-                b = np.array(s["b"], dtype=float)
+                b = _clean_reward(s["b"])
+                n = int(s.get("n", 0))
             except Exception:
                 continue
-            n = int(s.get("n", 0))
+            if b is None or not np.all(np.isfinite(A)) or not (0 <= n <= 1_000_000):
+                continue
+            d = bandit.setdefault(arm, {"A_sum": None, "nA": 0, "b_sum": None, "n": 0})
             d["n"] += n
             if n > 0:                       # only real learners vote on the prior
                 d["nA"] += 1
                 d["A_sum"] = A if d["A_sum"] is None else d["A_sum"] + A
                 d["b_sum"] = b if d["b_sum"] is None else d["b_sum"] + b
-        for pair, ms in (st.get("median_ms") or {}).items():
+        pairs = st.get("median_ms") or {}
+        if not isinstance(pairs, dict):
+            continue
+        for pair, ms in list(pairs.items())[:2048]:
             try:
                 ms = float(ms)
-            except Exception:
+            except (TypeError, ValueError):
+                continue
+            if not (0.0 < ms <= MAX_LATENCY_MS) or not isinstance(pair, str):
                 continue
             if pair not in medians or ms < medians[pair]:
                 medians[pair] = ms
@@ -146,7 +239,7 @@ def merge_states(states: list[dict]) -> dict:
         out_bandit[arm] = {
             "A": (d["A_sum"] / max(d["nA"], 1)).tolist(),
             "b": d["b_sum"].tolist(),
-            "n": d["n"],
+            "n": min(d["n"], 1_000_000),
         }
     return {"version": 1, "clock": clock + 1, "updated": time.time(),
             "bandit": out_bandit, "median_ms": medians}
@@ -193,8 +286,10 @@ class CloudSync:
         if not self.cfg.get("cloud_enabled"):
             return False
         if self.mode == "gist":
-            return bool(self.gist_id and self.gist_id != DEFAULT_GIST_ID)
-        return bool(self.url)
+            return (self.gist_id.startswith("https://") or API_ROOT.startswith("https://")) \
+                and bool(self.gist_id and self.gist_id != DEFAULT_GIST_ID)
+        # url mode: refuse plaintext/invalid endpoints - nothing leaves over http
+        return _check_url(self.url)
 
     # -- payload ------------------------------------------------------------ #
     def build_payload(self) -> dict:
@@ -205,22 +300,41 @@ class CloudSync:
 
     # -- pull --------------------------------------------------------------- #
     def pull(self) -> bool:
-        """Download pooled state and merge it into the local bandit."""
+        """Download pooled state and merge it into the local bandit.
+
+        The remote is UNTRUSTED input: everything is size-capped in _request,
+        arm-validated in import_state, latency-bounded here, and a sha256 of
+        the accepted state is recorded for tamper visibility.
+        """
+        if not self.enabled():
+            return False
         with self._lock:
             state = self._fetch_pooled()
-            if not state or not state.get("bandit"):
+            if not state or not isinstance(state.get("bandit"), dict):
                 return False
             try:
+                digest = hashlib.sha256(
+                    json.dumps(state, sort_keys=True).encode("utf-8")).hexdigest()[:16]
                 self.selector.bandit.import_state(state["bandit"])
-                for pair, ms in (state.get("median_ms") or {}).items():
+                for pair, ms in list((state.get("median_ms") or {}).items())[:2048]:
+                    try:
+                        ms = float(ms)
+                    except (TypeError, ValueError):
+                        continue
+                    if not (0.0 < ms <= MAX_LATENCY_MS):
+                        continue
                     cur = self.selector.median_ms.get(pair)
-                    if cur is None or float(ms) < cur:
-                        self.selector.median_ms[pair] = float(ms)
+                    if cur is None or ms < cur:
+                        self.selector.median_ms[pair] = ms
                 self.selector._save_state()
                 self._set_meta("cloud_last_pull", time.time())
                 self._set_meta("cloud_clock", int(state.get("clock", 0)))
+                self._set_meta("cloud_last_sha256", digest)
+                log.info("pulled cloud state %s (%d arms)", digest,
+                         len(state["bandit"]))
                 return True
-            except Exception:
+            except Exception as exc:                     # never break local ML
+                log.debug("cloud pull failed: %s", exc)
                 return False
 
     def _fetch_pooled(self) -> Optional[dict]:
@@ -246,6 +360,8 @@ class CloudSync:
     # -- push --------------------------------------------------------------- #
     def push(self) -> bool:
         """Upload our aggregate learnings to the shared pool."""
+        if not self.enabled():
+            return False
         with self._lock:
             payload = self.build_payload()
             if self.mode == "gist":
@@ -270,10 +386,14 @@ class CloudSync:
         data = _request(f"{API_ROOT}/gists/{self.gist_id}", headers=self._gh_headers())
         if not data:
             return False
-        files = dict(data.get("files") or {})
+        files = data.get("files") or {}
         mine = f"contrib-{_contributor_id(self.cfg)}.json"
-        keep = {k: {"content": v["content"]} for k, v in files.items()
-                if k.endswith(".json") and "content" in v}
+        keep = {}
+        for k, v in files.items():
+            content = v.get("content")
+            if (k.endswith(".json") and isinstance(content, str)
+                    and len(content) <= MAX_CONTRIB_BYTES):
+                keep[k] = {"content": content}
         # strip our own stale copy, merge everything, re-add merged + contribution
         keep.pop(mine, None)
         keep.pop("merged.json", None)
@@ -348,6 +468,7 @@ class CloudSync:
                 "token_set": bool(self.token),
                 "last_pull": self.cfg.get("cloud_last_pull"),
                 "last_push": self.cfg.get("cloud_last_push"),
+                "state_sha256": self.cfg.get("cloud_last_sha256"),
                 "arms_learned": len(self.selector.bandit.n),
                 "samples": sum(self.selector.bandit.n.values())}
 
@@ -370,9 +491,12 @@ def merge_gist_worker(gist_id: Optional[str] = None, token_: Optional[str] = Non
     if not data:
         raise RuntimeError(f"cannot read gist {gid}")
     files = data.get("files") or {}
-    contribs, keep = [], {k: {"content": v["content"]}
-                          for k, v in files.items()
-                          if k.startswith("contrib-") and "content" in v}
+    contribs, keep = [], {}
+    for k, v in files.items():
+        content = v.get("content")
+        if (k.startswith("contrib-") and isinstance(content, str)
+                and len(content) <= MAX_CONTRIB_BYTES):
+            keep[k] = {"content": content}
     for f in keep.values():
         try:
             contribs.append(json.loads(f["content"]))

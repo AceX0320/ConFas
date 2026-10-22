@@ -128,11 +128,35 @@ class _LinearBandit:
         return {a: {"A": self.A[a].tolist(), "b": self.b[a].tolist(), "n": self.n[a]}
                 for a in self.A}
 
+    MAX_SAMPLES_PER_ARM = 1_000_000   # hard cap: blocks "poison-by-count" attacks
+
     def import_state(self, state: dict) -> None:
-        for a, s in (state or {}).items():
-            self.A[a] = np.array(s["A"], dtype=float)
-            self.b[a] = np.array(s["b"], dtype=float)
-            self.n[a] = int(s.get("n", 0))
+        """Import remote arm state with strict validation (security boundary).
+
+        Anything malformed, oversized, non-finite or structurally wrong is
+        rejected arm-by-arm - the local bandit can never be corrupted by a
+        hostile/misbehaving cloud endpoint.
+        """
+        if not isinstance(state, dict):
+            return
+        for a, s in list(state.items())[:512]:          # bound #arms from remote
+            try:
+                if not isinstance(a, str) or len(a) > 128 or not isinstance(s, dict):
+                    continue
+                A = np.array(s["A"], dtype=float)
+                b = np.array(s["b"], dtype=float)
+                n = int(s.get("n", 0))
+                d = self.dim
+                ok = (A.shape == (d, d) and b.shape == (d,)
+                      and np.all(np.isfinite(A)) and np.all(np.isfinite(b))
+                      and 0 <= n <= self.MAX_SAMPLES_PER_ARM
+                      and np.allclose(A, A.T)                 # covariance must be symmetric
+                      and np.linalg.eigvalsh(A).min() > -1e-6)  # ...and PSD
+                if not ok:
+                    continue
+                self.A[a], self.b[a], self.n[a] = A, b, min(n, self.MAX_SAMPLES_PER_ARM)
+            except Exception:
+                continue                                # skip garbage arms
 
 
 # --------------------------------------------------------------------------- #

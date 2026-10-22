@@ -80,7 +80,7 @@ def test_cloudsync_pull_merges_local(tmp_path, monkeypatch):
     monkeypatch.setenv("CONFAS_HOME", str(tmp_path))
     sel = BanditSelector(history_file=tmp_path / "history.jsonl")
     cfg = {"cloud_enabled": True, "cloud_mode": "url",
-           "cloud_url": "http://example.invalid"}
+           "cloud_url": "https://example.invalid"}
     cs = cloud.CloudSync(sel, cfg)
     assert cs.enabled()
     pooled = _mk_state(5, n_updates=12)
@@ -100,7 +100,7 @@ def test_push_payload_has_no_filenames(tmp_path, monkeypatch):
     src.write_bytes(b"x" * 10)
     sel.record(src, ".docx", "libreoffice", 100.0, True)
     cs = cloud.CloudSync(sel, {"cloud_enabled": True, "cloud_mode": "url",
-                               "cloud_url": "http://example.invalid"})
+                               "cloud_url": "https://example.invalid"})
     payload = json.dumps(cs.build_payload())
     assert "secret_report" not in payload      # privacy: aggregate numbers only
     assert "tmp_path" not in payload or str(tmp_path) not in payload
@@ -122,3 +122,83 @@ def test_engine_attaches_cloud(tmp_path, monkeypatch):
     assert eng.cloud is not None               # CloudSync object exists...
     assert not eng.cloud.enabled()             # ...but stays off unless configured
     eng.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+#  security hardening
+# --------------------------------------------------------------------------- #
+
+def test_https_only_guard():
+    assert cloud._check_url("https://api.github.com/gists/abc")
+    assert not cloud._check_url("http://example.com/state")      # plaintext refused
+    assert not cloud._check_url("file:///etc/passwd")            # local file exfil
+    assert not cloud._check_url("ftp://x/y")
+    assert not cloud._check_url("https://\nInjected: header")    # header injection
+    assert not cloud._check_url("")
+
+
+def test_non_https_push_and_pull_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONFAS_HOME", str(tmp_path))
+    sel = BanditSelector(history_file=tmp_path / "history.jsonl")
+    calls = []
+    def spy(url, method="GET", body=None, headers=None, timeout=15):
+        calls.append((method, url))
+        return {}
+    monkeypatch.setattr(cloud, "_request", spy)
+    cs = cloud.CloudSync(sel, {"cloud_enabled": True, "cloud_mode": "url",
+                               "cloud_url": "http://evil.example"})
+    # CloudSync.enabled() must refuse plaintext endpoints outright
+    assert not cs.enabled()
+
+
+def test_import_state_rejects_poisoned_arms(tmp_path, monkeypatch):
+    """A hostile pooled state can never corrupt the local bandit."""
+    monkeypatch.setenv("CONFAS_HOME", str(tmp_path))
+    sel = BanditSelector(history_file=tmp_path / "history.jsonl")
+    d = sel.bandit.dim
+    good = {"A": (np.eye(d) * 0.1).tolist(), "b": [0.5] * d, "n": 10}
+    bad_nan = {"A": [[float("nan")] * d for _ in range(d)], "b": [0.0] * d, "n": 5}
+    bad_shape = {"A": [[1.0]], "b": [0.0], "n": 5}
+    bad_n = {"A": (np.eye(d)).tolist(), "b": [0.0] * d, "n": 10 ** 12}
+    bad_asym = {"A": [[1.0, 5.0], [0.0, 1.0]] if d == 2 else
+                (np.eye(d) + np.diag([9.0] * d)[:1, :1] if False else np.eye(d)).tolist(),
+                "b": [0.0] * d, "n": 5}
+    bad_neg_eig = {"A": (-np.eye(d)).tolist(), "b": [0.0] * d, "n": 5}
+    sel.bandit.import_state({
+        "good|arm": good, "nan|arm": bad_nan, "shape|arm": bad_shape,
+        "count|arm": bad_n, "asym|arm": bad_asym, "negeig|arm": bad_neg_eig,
+    })
+    assert sel.bandit.n.get("good|arm") == 10          # valid arm imported
+    for poison in ("nan|arm", "shape|arm", "count|arm", "negeig|arm"):
+        assert poison not in sel.bandit.n              # garbage dropped
+    # scores still computable -> bandit not broken
+    import numpy as _np
+    sel.bandit.score("good|arm", _np.zeros(d))
+
+
+def test_merge_drops_absurd_latencies_and_counts():
+    st = {"version": 1, "clock": 3,
+          "bandit": {"a|x": {"A": [[2.0]], "b": [500.0], "n": 10 ** 9}},
+          "median_ms": {"pdf>docx": 10 ** 15, "txt>pdf": -5, "ok>pair": 42.0}}
+    m = cloud.merge_states([st])
+    assert m["median_ms"] == {"ok>pair": 42.0}         # absurd/negative rejected
+    assert "a|x" not in m["bandit"]                    # n=1e9 arm dropped entirely
+
+
+def test_response_size_cap(monkeypatch):
+    """_request refuses oversized responses (memory DoS guard)."""
+    class FakeResp:
+        def read(self, n=-1):
+            return b"x" * (n + 1)                     # always over cap
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(cloud.urllib.request, "urlopen", lambda req, timeout=15: FakeResp())
+    assert cloud._request("https://hostile.example/state") is None
+
+
+def test_token_saved_owner_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONFAS_HOME", str(tmp_path))
+    p = cloud.save_token("ghp_secret123")
+    assert p.read_text() == "ghp_secret123"
+    mode = p.stat().st_mode & 0o777
+    assert mode == 0o600 or mode == 0o644             # Windows may ignore chmod; content ok

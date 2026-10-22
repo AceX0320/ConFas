@@ -205,6 +205,11 @@ def cmd_stats(args) -> int:
             print(f"  last pull: {time.strftime('%Y-%m-%d %H:%M', time.localtime(cs.cfg['cloud_last_pull']))}"
                   f" | last push: "
                   f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(cs.cfg['cloud_last_push'])) if cs.cfg.get('cloud_last_push') else 'never'}")
+            if cs.cfg.get("cloud_last_sha256"):
+                print(f"  pooled state sha256: {cs.cfg['cloud_last_sha256']}")
+        if cs.enabled():
+            print("  security: HTTPS-only, aggregate numbers only (no file names/"
+                  "paths/content), remote state fully validated before import.")
     except Exception as exc:  # pragma: no cover
         print(f"Cloud sync: unavailable ({exc})")
     return 0
@@ -242,8 +247,18 @@ def cmd_config(args) -> int:
             cfg["cloud_gist_id"] = v.strip()
             cfg["cloud_mode"] = "gist"
         elif k == "cloud_url":
+            from .cloud import _check_url
+            if not _check_url(v.strip()):
+                print("error: cloud_url must be a valid https:// URL "
+                      "(plaintext http is refused for security)")
+                return 1
             cfg["cloud_url"] = v.strip()
             cfg["cloud_mode"] = "url"
+        elif k == "cloud_token":
+            from .cloud import save_token
+            p = save_token(v)
+            print(f"token saved to {p} (owner-only). It should be a fine-grained "
+                  f"PAT with ONLY the 'gist' scope.")
         elif k in ("cloud_interval", "cloud_interval_s"):
             cfg["cloud_interval_s"] = max(60, int(float(v)))
         else:

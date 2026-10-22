@@ -80,6 +80,34 @@ vectors sum, covariance matrices average (keeps the ridge prior well-scaled),
 latency medians take the minimum, and a Lamport clock guards ordering — so
 concurrent users can never corrupt the pool.
 
+### Security model (defence in depth)
+
+* **Where it lives:** only two endpoints are ever contacted —
+  `https://api.github.com` (gist mode) or *your own* `https://…` URL. Plaintext
+  `http://`, `file://`, `ftp://` and malformed URLs are hard-refused by an
+  allow-list (`_check_url`); TLS certificate verification is always on and
+  cannot be disabled from config.
+* **Least-privilege credentials:** the token is a fine-grained GitHub PAT with
+  the `gist` scope *only* — it cannot touch repos, code, packages, issues or
+  any account data. It is stored locally (`~/.confas/cloud_token`, created via
+  `os.open(..., 0o600)`; on Windows use `setx` so it stays in your user
+  profile) and is sent exclusively to `api.github.com`. Use **your own** token;
+  nothing of yours is ever accessible through someone else's.
+* **Nothing identifying leaves the machine:** payload = weight matrices +
+  per-pair median latencies + counters. No file names, paths, document content,
+  usernames or hardware IDs (client id is a random UUID). Verified by test.
+* **Hostile-server protection (model poisoning):** downloaded state is treated
+  as untrusted input — 2 MiB response cap, ≤512 arms, ≤1M samples/arm, every
+  matrix validated (shape/finiteness/symmetry/positive-semi-definite), rewards
+  clamped to [-1, 1], latencies bounded to sane ranges, sha256 of accepted
+  state recorded for tamper visibility. Garbage arms are dropped one by one.
+* **ML can never break correctness:** even a perfectly poisoned pooled model
+  can only reorder *which backend tries first*; the curated fallback chains
+  still run, so conversions stay correct offline, online, or under attack.
+* **Fail-open locally:** any sync error is logged and ignored; the local bandit
+  keeps learning normally. Turning it off is one command:
+  `ConFas.exe config cloud_sync=off`.
+
 ---
 
 ## Build the EXE
