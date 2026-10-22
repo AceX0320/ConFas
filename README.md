@@ -1,2 +1,105 @@
-# ConFas
-A local conversion tool for documents.
+# ConFas ⚡ — ultra-fast local document converter for Windows
+
+**One EXE. Right-click any document → converted. Learns to get faster.**
+
+ConFas is a 100 % local, offline document conversion tool:
+
+* **Right-click menu** in Explorer — *"Convert with ConFas"* on every document/image type.
+* **Always running** — after the first double-click it registers itself in **Task Manager → Startup apps** and lives in the system tray forever.
+* **Latest-generation output only** — `.doc` never produces legacy Word 97; you get `.docx` (OOXML 2007+), `.xlsx`, `.pptx`, modern image codecs (WebP/AVIF/JPEG XL), UTF-8 text…
+* **Adaptive ML routing** *(the "trick")* — a lightweight contextual bandit (LinUCB) learns from every conversion which backend is fastest/most reliable **on your machine for files like yours**, and re-orders the fallback chain accordingly. Speed improves with use; correctness can never degrade (fallbacks are always kept). If you don't want it: `confas config ml=off` or `CONFAS_DISABLE_ML=1`.
+
+---
+
+## How it works (speed & perfection)
+
+| Conversion | Fastest backend (auto-picked) | Fallbacks |
+|---|---|---|
+| DOCX/XLSX/PPTX/DOC/XLS/PPT/ODT/RTF → PDF | **Microsoft Office COM** (`SaveAs2` FileFormat 17 / ExportAsFixedFormat) | LibreOffice headless |
+| PDF → DOCX | **pdf2docx** (layout/table/image preserving) | LibreOffice filter `MS Word 2007 XML` |
+| Legacy .doc/.xls/.ppt → modern | Office COM FileFormat **12 / 51 / 24** (= OOXML 2007+) | LibreOffice `MS * 2007 XML` filters |
+| Images ↔ images | **Pillow** (C-accelerated, 4:4:4 chroma, quality presets) | LibreOffice |
+| TXT/MD/CSV/HTML → DOCX | **python-docx** (real headings/lists/bold/code styles) | LibreOffice |
+| DOCX → TXT/MD | python-docx direct read | LibreOffice |
+| EPUB → TXT/DOCX/HTML | stdlib zip + spine-order extraction | — |
+| PDF → TXT | pypdf (fast, no rendering) | LibreOffice |
+
+Notes on *perfection*:
+* LibreOffice filters used are explicitly the **2007 XML** generation ones — never `MS Word 97`.
+* Text outputs are written as UTF-8 (with BOM where Windows consumers expect it).
+* Every pair has an ordered fallback chain; if all fail you get a clear error popup instead of a broken file.
+* Persistent worker pool + daemon means no cold-start per conversion.
+
+## The ML part (`src/confas/learning.py`)
+
+For each `(source→target, backend)` arm the engine records latency + success.
+A LinUCB linear bandit over features (file size, path depth, hour-of-day, src/dst format one-hots) picks the next attempt order. State persists in `%USERPROFILE%\.confas\bandit.json`; every run is logged to `history.jsonl` and visible via:
+
+```bat
+ConFas.exe stats
+```
+
+Cold start falls back to static weights; exploration bonus guarantees the model keeps testing alternatives, but a failing arm is demoted instantly and the engine transparently retries the next backend — so results stay correct even mid-learning.
+
+---
+
+## Build the EXE
+
+> A Windows `.exe` must be produced on Windows (PyInstaller cannot cross-compile). Two options, both ~3 minutes:
+
+### Option A — one command on your PC
+```powershell
+git clone <this-repo> && cd <repo>
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+The script creates a venv, installs deps, runs `build.py`, copies `dist\ConFas.exe` to `%LOCALAPPDATA%\ConFas`, performs the install (startup + right-click menu) and launches the tray daemon.
+
+### Option B — free GitHub CI
+Push this repo to GitHub; the included workflow **`.github/workflows/build.yml`** runs tests on Linux and builds `ConFas.exe` on `windows-latest`, publishing it as the downloadable artifact **`ConFas-windows-exe`**.
+
+Manual build if you prefer:
+```bat
+py -3.12 -m venv .venv && .venv\Scripts\activate
+pip install -r requirements.txt pyinstaller pywin32 pystray
+python build.py        REM -> dist\ConFas.exe
+```
+
+## Use
+
+1. **Double-click `ConFas.exe` once.** It self-installs:
+   * adds **"Convert with ConFas"** to the right-click menu of pdf/doc/docx/xls/xlsx/ppt/pptx/odt/ods/odp/rtf/txt/md/csv/html/epub/png/jpg/… (HKCU shell verbs — no admin needed);
+   * writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\ConFas` → it now appears in **Task Manager → Startup apps** and starts with Windows automatically;
+   * stays running in the tray (watch folder + fast warm engine).
+   * Sign out/in once (or restart Explorer) so the new menu entries appear.
+2. **Right-click a document → Convert with ConFas** → output appears next to it in the newest format version (PDF→DOCX gives real OOXML `.docx`).
+3. Bonus: drop files into **`%USERPROFILE%\ConFasDrop`** → auto-converted.
+
+CLI (same binary):
+```bat
+ConFas.exe convert report.pdf                REM -> report.docx (latest gen)
+ConFas.exe convert a.doc b.xls -t pdf        REM batch, parallel
+ConFas.exe status                            REM detected backends / registration
+ConFas.exe stats                             REM learned per-backend performance
+ConFas.exe config auto_target=docx watch_folder=D:\drop ml=on
+ConFas.exe uninstall                         REM removes startup entry + menu
+```
+
+## Repository layout
+```
+src/confas/engine.py     conversion engine + backend routing (newest-gen filters)
+src/confas/learning.py   LinUCB adaptive ML backend selector
+src/confas/monitor.py    tray daemon, watch folder, startup + context-menu installer
+src/confas/cli.py        command line / right-click entry point
+entry_point.py           frozen-EXE entry (double-click = install + run forever)
+build.py / confas.spec   PyInstaller build
+scripts/install.ps1      one-shot Windows setup
+scripts/make_icon.py     generates assets/confas.ico
+tests/                   13 cross-platform tests (engine, ML convergence, watcher)
+.github/workflows/build.yml  CI: tests + windows EXE artifact
+```
+
+## Requirements
+* Windows 10/11, Python 3.10+ only to *build* (not to run the EXE).
+* For best fidelity/speed install either **Microsoft Office** (COM backend) or **LibreOffice** (headless backend). Pillow/python-docx/pdf2docx/pypdf/numpy are bundled inside the EXE.
+* Pure image/text/markup conversions work with nothing else installed.
+

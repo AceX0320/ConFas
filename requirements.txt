@@ -1,0 +1,12 @@
+# Core runtime deps (bundled into the EXE by PyInstaller)
+numpy>=1.26              # adaptive ML backend selector (LinUCB bandit)
+Pillow>=10.2             # image conversions + tray icon drawing
+python-docx>=1.1         # DOCX read/write (OOXML 2007+ generation)
+pdf2docx>=0.5.8          # layout-preserving PDF -> DOCX
+pypdf>=4.0               # fast PDF text extraction
+charset-normalizer>=3.3  # encoding detection fallback
+chardet>=5.2             # encoding detection
+
+# Windows-only extras
+pywin32>=306 ; sys_platform == "win32"    # Office COM automation (fastest doc->pdf)
+pystray>=0.19.5 ; sys_platform == "win32" # system-tray daemon

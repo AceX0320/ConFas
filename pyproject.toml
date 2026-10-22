@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "confas"
+version = "1.0.0"
+description = "Ultra-fast local document converter with right-click menu, startup daemon and adaptive ML backend routing"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "Pillow>=10.2",
+  "python-docx>=1.1",
+  "pdf2docx>=0.5.8",
+  "pypdf>=4.0",
+  "chardet>=5.2",
+]
+
+[project.optional-dependencies]
+windows = ["pywin32>=306", "pystray>=0.19.5"]
+dev = ["pytest>=8.0", "pyinstaller>=6.6"]
+
+[project.scripts]
+confas = "confas.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
