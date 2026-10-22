@@ -1,0 +1,74 @@
+name: release exe (download link)
+
+# Builds ConFas.exe and publishes it as a GitHub Release asset.
+# Users download the EXE directly from:
+#   https://github.com/<owner>/<repo>/releases/latest/download/ConFas.exe
+# No cloning, no building required.
+
+on:
+  push:
+    tags:
+      - "v*"          # e.g. git tag v1.0.0 && git push origin v1.0.0
+  workflow_dispatch:  # manual build+release from the Actions tab
+
+permissions:
+  contents: write     # needed to create releases
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest tests/ -v
+
+  release-exe:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", architecture: x64 }
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt pyinstaller
+          pip install pywin32 pystray
+
+      - name: Generate icon (if missing)
+        run: python scripts/make_icon.py
+
+      - name: Build ConFas.exe
+        run: python build.py
+
+      - name: Record build commit + timestamp (for freshness checks)
+        shell: pwsh
+        run: |
+          $sha = git rev-parse HEAD
+          $ts  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          Set-Content -Path build-info.txt -Value "commit=$sha`nbuilt_at=$ts`ntag=${{ github.ref_name }}"
+
+      - name: Create / update GitHub Release with the EXE
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist/ConFas.exe
+            build-info.txt
+          body: |
+            ## ConFas Windows EXE
+
+            Direct download link (always points to the newest release):
+            ```
+            https://github.com/${{ github.repository }}/releases/latest/download/ConFas.exe
+            ```
+
+            Built from commit `${{ github.sha }}`.
+
+            **ML improvements travel separately from the EXE** (so you never
+            need a new download to get them): if cloud sync is enabled by the
+            community owner, every user pulls the pooled learnings on launch —
+            see README "Shared learnings". A fresh install of this EXE therefore
+            starts warm, not cold.

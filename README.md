@@ -110,7 +110,40 @@ concurrent users can never corrupt the pool.
 
 ---
 
-## Build the EXE
+## Download the EXE (no clone, no build)
+
+Once a release is published, the direct download link is:
+
+```
+https://github.com/<owner>/<repo>/releases/latest/download/ConFas.exe
+```
+
+* `<owner>/<repo>` = this repository once you push it to GitHub.
+* `/releases/latest/download/...` **always resolves to the newest published
+  version** — one permanent link that never goes stale.
+
+Publishing happens automatically via `.github/workflows/release.yml`:
+
+1. Push the repo to GitHub.
+2. Tag and push a version → CI runs the full test suite, builds `ConFas.exe`
+   on a Windows runner and attaches it (plus `build-info.txt` with commit +
+   timestamp) to a GitHub Release:
+   ```bat
+   git tag v1.0.0
+   git push origin v1.0.0
+   ```
+3. Share the permanent link above. Anyone who downloads and double-clicks the
+   EXE gets the self-install (right-click menu + Task Manager Startup entry).
+
+**"Each EXE downloaded with the latest improvements":** ML learnings are
+deliberately *not* baked into the binary (that would force a re-download every
+time anyone converts a file). They live in the shared cloud pool (section
+"Shared learnings"): every user pulls the pooled state on launch, so a
+brand-new install of any release starts warm — improvements arrive
+continuously, far faster than any rebuild could ship them. The EXE itself only
+needs re-releasing when code changes, via the tag step above.
+
+## Build the EXE yourself
 
 > A Windows `.exe` must be produced on Windows (PyInstaller cannot cross-compile). Two options, both ~3 minutes:
 
