@@ -55,6 +55,14 @@ DEFAULT_CONFIG = {
     "auto_target": "pdf",          # what dropped files are converted to by default
     "ml_enabled": True,
     "notify": True,
+    # --- shared-learnings cloud sync (opt-in, aggregate stats only) ------ #
+    "cloud_enabled": False,        # enable with: confas config cloud_sync=on
+    "cloud_mode": "gist",          # "gist" (zero-backend) or "url" (own server)
+    "cloud_gist_id": "REPLACE_WITH_YOUR_GIST_ID",
+    "cloud_url": "",               # used when cloud_mode=url
+    "cloud_interval_s": 900,       # background push/pull cadence
+    "cloud_debounce_s": 60,        # min seconds between uploads
+    "cloud_pull_on_start": True,
 }
 
 

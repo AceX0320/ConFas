@@ -187,7 +187,35 @@ def cmd_stats(args) -> int:
     ml_on = bool(monitor.load_config().get("ml_enabled")) and os.environ.get("CONFAS_DISABLE_ML") != "1"
     print(f"\nML backend-selection: {'ENABLED' if ml_on else 'disabled'} "
           f"(toggle with `confas config ml=off` or CONFAS_DISABLE_ML=1)")
+    # cloud sync status
+    try:
+        from .cloud import CloudSync, DEFAULT_GIST_ID
+        cfg = monitor.load_config()
+        sel_stub = _StubSelector()
+        cs = CloudSync(sel_stub, cfg)
+        gist_cfgured = (cfg.get("cloud_gist_id") or "") not in ("", DEFAULT_GIST_ID)
+        print(f"Cloud learnings sync: {'ON' if cs.enabled() else 'off'} "
+              f"(mode={cs.mode}, endpoint={'set' if cs.enabled() else 'not configured'})")
+        if not cs.enabled() and not gist_cfgured and not cfg.get("cloud_url"):
+            print("  -> share your ML improvements with other users:")
+            print("     ConFas.exe config cloud_gist=<your-gist-id>")
+            print("     setx CONFAS_CLOUD_TOKEN <github-pat-with-gist-scope>")
+            print("     ConFas.exe config cloud_sync=on   (see README: Shared learnings)")
+        elif cs.cfg.get("cloud_last_pull"):
+            print(f"  last pull: {time.strftime('%Y-%m-%d %H:%M', time.localtime(cs.cfg['cloud_last_pull']))}"
+                  f" | last push: "
+                  f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(cs.cfg['cloud_last_push'])) if cs.cfg.get('cloud_last_push') else 'never'}")
+    except Exception as exc:  # pragma: no cover
+        print(f"Cloud sync: unavailable ({exc})")
     return 0
+
+
+class _StubSelector:
+    """Minimal object so cmd_stats can read cloud status without a real bandit."""
+    class _B:
+        n: dict = {}
+    bandit = _B()
+    median_ms: dict = {}
 
 
 def cmd_config(args) -> int:
@@ -208,6 +236,16 @@ def cmd_config(args) -> int:
             cfg["ml_enabled"] = v.lower() in ("1", "on", "true", "yes")
         elif k in ("watch", "watch_enabled"):
             cfg["watch_enabled"] = v.lower() in ("1", "on", "true", "yes")
+        elif k in ("cloud_sync", "cloud", "cloud_enabled"):
+            cfg["cloud_enabled"] = v.lower() in ("1", "on", "true", "yes")
+        elif k == "cloud_gist":
+            cfg["cloud_gist_id"] = v.strip()
+            cfg["cloud_mode"] = "gist"
+        elif k == "cloud_url":
+            cfg["cloud_url"] = v.strip()
+            cfg["cloud_mode"] = "url"
+        elif k in ("cloud_interval", "cloud_interval_s"):
+            cfg["cloud_interval_s"] = max(60, int(float(v)))
         else:
             print(f"unknown key '{k}'", file=sys.stderr)
             continue

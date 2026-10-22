@@ -153,7 +153,12 @@ class BanditSelector:
         self.state_file = self.data_dir / "bandit.json"
         self.median_ms: dict[str, float] = {}       # "src>dst|arm" -> running median-ish
         self.bandit = _LinearBandit()
+        self.cloud = None                           # optional CloudSync (see cloud.py)
         self._load_state()
+
+    def attach_cloud(self, cloud) -> None:
+        """Wire a confas.cloud.CloudSync instance into this selector."""
+        self.cloud = cloud
 
     # -- persistence -------------------------------------------------------- #
     def _load_state(self) -> None:
@@ -216,6 +221,13 @@ class BanditSelector:
         if ok:
             prev = self.median_ms.get(key)
             self.median_ms[key] = elapsed_ms if prev is None else prev * 0.7 + elapsed_ms * 0.3
+
+        # opportunistic cloud sync (fire-and-forget; only when enabled)
+        try:
+            if self.cloud is not None and self.cloud.enabled():
+                self.cloud._schedule_now()
+        except Exception:
+            pass
 
         entry = {
             "pair": pair_key, "arm": arm, "ms": round(elapsed_ms, 1),

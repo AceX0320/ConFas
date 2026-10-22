@@ -41,6 +41,45 @@ ConFas.exe stats
 
 Cold start falls back to static weights; exploration bonus guarantees the model keeps testing alternatives, but a failing arm is demoted instantly and the engine transparently retries the next backend — so results stay correct even mid-learning.
 
+## Shared learnings (optional cloud sync) — "send the improvements somewhere"
+
+ConFas can **pool everyone's ML learnings** so that a person who downloads the
+tool later starts with an already-trained model instead of a cold one. This is
+**opt-in and privacy-safe**: only aggregate numbers are exchanged (learned
+weight matrices + median latencies per format pair). *Never* file names, paths
+or contents. The conversion itself always stays 100% local.
+
+### Recommended setup: a community GitHub Gist (zero backend needed)
+
+1. **Owner (you), once:** create a secret gist containing one small JSON file
+   (`merged.json` = `{"version":1,"clock":0,"bandit":{},"median_ms":{}}`),
+   note its ID from the URL, then in repo settings add two GitHub Secrets:
+   `CONFAS_GIST_ID` and `CONFAS_CLOUD_TOKEN` (fine-grained PAT with `gist`
+   scope). The included workflow `.github/workflows/cloud-merge-cron.yml`
+   runs every 6 h and merges all `contrib-*.json` files into `merged.json`.
+2. Ship the EXE with defaults baked in, or let each user configure it:
+
+```bat
+ConFas.exe config cloud_gist=<the-gist-id>
+setx CONFAS_CLOUD_TOKEN <your-pat-with-gist-scope>
+ConFas.exe config cloud_sync=on
+```
+
+That's it. Every conversion now (debounced to ≤1 upload/minute) pushes your
+aggregate learning as `contrib-<clientid>.json`, and periodically pulls the
+pooled `merged.json` back into your local bandit — so you also benefit from
+everyone else's machines. Check state any time with `ConFas.exe stats`
+("Cloud learnings sync: ON/OFF, last pull/push").
+
+Alternative: run any tiny REST endpoint speaking `GET /state` + `PUT /state`
+(Cloudflare Worker/KV, S3, nginx+file…) and use `config cloud_url=https://...`
+instead of the gist.
+
+Merge rules (`src/confas/cloud.py::merge_states`): sample counts sum, reward
+vectors sum, covariance matrices average (keeps the ridge prior well-scaled),
+latency medians take the minimum, and a Lamport clock guards ordering — so
+concurrent users can never corrupt the pool.
+
 ---
 
 ## Build the EXE

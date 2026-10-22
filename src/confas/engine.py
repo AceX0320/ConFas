@@ -795,6 +795,17 @@ class ConversionEngine:
                 self._selector = BanditSelector(history_file or (DATA_DIR / "history.jsonl"))
             except Exception:
                 self._selector = None
+            if self._selector is not None:
+                try:
+                    from .cloud import CloudSync
+                    cloud = CloudSync(self._selector)
+                    self._selector.attach_cloud(cloud)
+                    self.cloud = cloud
+                    cloud.start()          # no-op unless cloud_sync is on
+                except Exception:
+                    self.cloud = None
+            else:
+                self.cloud = None
         self._pool = ThreadPoolExecutor(max_workers=max(2, (os.cpu_count() or 4)))
         self._lock = threading.Lock()
 
