@@ -812,44 +812,86 @@ class ConversionEngine:
     # -- single ------------------------------------------------------------- #
     def convert(self, src: str | Path, dst_ext: str, out_dir: Optional[str | Path] = None,
                 out_path: Optional[str | Path] = None) -> ConversionResult:
+        from . import debuglog
+        from .debuglog import _fmt_exc
+        sess = debuglog.new_session(src, dst_ext)
+
         src = Path(src)
         if not src.exists():
-            return ConversionResult(str(src), "", "-", 0, False, "source file not found")
+            res = ConversionResult(str(src), "", "-", 0, False, "source file not found")
+            sess.update(ok=False, final_error=res.error, attempts=[],
+                        planned_out="", out_path="")
+            debuglog.finalize(sess, res)
+            return res
         dst_ext = _norm_ext(dst_ext)
         if not dst_ext:
-            return ConversionResult(str(src), "", "-", 0, False, "missing target extension")
+            res = ConversionResult(str(src), "", "-", 0, False, "missing target extension")
+            sess.update(ok=False, final_error=res.error, attempts=[],
+                        planned_out="", out_path="")
+            debuglog.finalize(sess, res)
+            return res
 
         base = Path(out_path) if out_path else (Path(out_dir) if out_dir else src.parent) / (src.stem + dst_ext)
         base = _unique(Path(base))
+        sess["planned_out"] = str(base)
+        sess["dst_ext"] = dst_ext
+        try:
+            sess["bytes_in"] = src.stat().st_size
+        except OSError:
+            pass
 
         routes = _routes_for(src.suffix, dst_ext)
+        sess["routes_static"] = [r.name for r in routes]
         if self._selector:
-            routes = self._selector.rank(src, dst_ext, routes)
+            routes, ml_info = self._selector.rank_debug(src, dst_ext, routes) \
+                if hasattr(self._selector, "rank_debug") else (self._selector.rank(src, dst_ext, routes), {})
+            sess["ml"].update(ml_info)
+        sess["routes"] = [{"name": r.name, "weight": r.weight} for r in routes]
         if not routes:
-            return ConversionResult(str(src), dst_ext, "-", 0, False,
-                                    f"No conversion path known for {src.suffix} -> {dst_ext}")
+            res = ConversionResult(str(src), dst_ext, "-", 0, False,
+                                   f"No conversion path known for {src.suffix} -> {dst_ext}")
+            sess.update(ok=False, final_error=res.error, attempts=[])
+            debuglog.finalize(sess, res)
+            return res
 
         t0 = time.perf_counter()
         err = ""
+        attempts: list[dict] = []
         for r in routes:
+            ta = time.perf_counter()
             try:
                 base.parent.mkdir(parents=True, exist_ok=True)
                 r.fn(src, base)
                 ms = (time.perf_counter() - t0) * 1000
+                att_ms = (time.perf_counter() - ta) * 1000
+                attempts.append({"backend": r.name, "ok": True, "ms": att_ms,
+                                 "error": "", "traceback": ""})
                 if self._selector:
                     self._selector.record(src, dst_ext, r.name, ms, True)
-                return ConversionResult(str(src), str(base), r.name, ms, True,
-                                        bytes_in=src.stat().st_size,
-                                        bytes_out=base.stat().st_size if base.exists() else 0)
+                res = ConversionResult(str(src), str(base), r.name, ms, True,
+                                       bytes_in=src.stat().st_size,
+                                       bytes_out=base.stat().st_size if base.exists() else 0)
+                sess.update(ok=True, winning_backend=r.name, total_ms=ms,
+                            attempts=attempts, out_path=str(base),
+                            bytes_out=res.bytes_out)
+                debuglog.finalize(sess, res)
+                return res
             except Exception as exc:  # try next backend
                 ms_so_far = (time.perf_counter() - t0) * 1000
+                att_ms = (time.perf_counter() - ta) * 1000
                 if self._selector:
-                    self._selector.record(src, dst_ext, r.name, ms_so_far, False)
+                    self._selector.record(src, dst_ext, r.name, att_ms, False)
                 err = f"{type(exc).__name__}: {exc}"
+                attempts.append({"backend": r.name, "ok": False, "ms": att_ms,
+                                 "error": err, "traceback": _fmt_exc(exc)})
                 if os.environ.get("CONFAS_DEBUG"):
                     traceback.print_exc()
         ms = (time.perf_counter() - t0) * 1000
-        return ConversionResult(str(src), str(base), routes[0].name, ms, False, err)
+        res = ConversionResult(str(src), str(base), routes[0].name, ms, False, err)
+        sess.update(ok=False, final_error=err, attempts=attempts,
+                    total_ms=ms, out_path=str(base))
+        debuglog.finalize(sess, res)
+        return res
 
     # -- batch -------------------------------------------------------------- #
     def convert_many(self, jobs: list[tuple[str, str]],

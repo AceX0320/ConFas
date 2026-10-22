@@ -23,6 +23,7 @@ from pathlib import Path
 from . import __version__
 from .engine import get_engine, newest_target_for, BACKENDS, _norm_ext
 from . import monitor
+from . import debuglog as _dbg
 
 
 # --------------------------------------------------------------------------- #
@@ -63,6 +64,26 @@ def _popup(title: str, text: str) -> None:
 #  commands
 # --------------------------------------------------------------------------- #
 
+def _latest_report(res) -> str:
+    """Path of the debug txt report produced for this conversion (if any)."""
+    try:
+        out = Path(res.target or "")
+        cand = out.with_name(out.name + ".confas-debug.txt")
+        if cand.exists():
+            return str(cand)
+        dd = monitor.DATA_DIR / "debug"
+        if dd.exists():
+            stem = Path(res.source).stem[:60]
+            status = "OK" if res.ok else "FAIL"
+            matches = sorted(dd.glob(f"*-{stem}-{status}.confas-debug.txt"),
+                             key=lambda p: p.stat().st_mtime)
+            if matches:
+                return str(matches[-1])
+    except Exception:
+        pass
+    return ""
+
+
 def cmd_convert(args) -> int:
     files = [Path(f) for f in args.files]
     files = [f for f in files if f.exists()]
@@ -91,6 +112,10 @@ def cmd_convert(args) -> int:
         print(line)
         if not res.ok:
             print(f"      error: {res.error}", file=sys.stderr)
+        # full debugging layer: point at the txt report for this conversion
+        rep = _latest_report(res)
+        if rep:
+            print(f"      debug report: {rep}")
 
     t0 = time.perf_counter()
     engine.convert_many(jobs, progress=on_done)
@@ -154,6 +179,7 @@ def cmd_status(args) -> int:
         "watch_folder": cfg["watch_folder"],
         "auto_target": cfg["auto_target"],
         "ml_enabled": cfg["ml_enabled"],
+        "debug_reports": _dbg.get_mode(),
         "data_dir": str(monitor.DATA_DIR),
         "log": str(monitor.LOG_FILE),
     }
@@ -241,6 +267,14 @@ def cmd_config(args) -> int:
             cfg["ml_enabled"] = v.lower() in ("1", "on", "true", "yes")
         elif k in ("watch", "watch_enabled"):
             cfg["watch_enabled"] = v.lower() in ("1", "on", "true", "yes")
+        elif k in ("debug", "debug_reports"):
+            vv = v.strip().lower()
+            if vv not in ("always", "onerror", "off"):
+                print("debug must be one of: always | onerror | off")
+                return 1
+            cfg["debug_reports"] = vv
+        elif k == "debug_keep":
+            cfg["debug_keep"] = max(10, int(float(v)))
         elif k in ("cloud_sync", "cloud", "cloud_enabled"):
             cfg["cloud_enabled"] = v.lower() in ("1", "on", "true", "yes")
         elif k == "cloud_gist":

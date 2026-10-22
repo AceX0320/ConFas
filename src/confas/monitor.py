@@ -32,6 +32,11 @@ IS_WINDOWS = sys.platform == "win32"
 
 APP_NAME = "ConFas"
 DATA_DIR = Path(os.environ.get("CONFAS_HOME", str(Path.home() / ".confas")))
+
+
+def data_dir() -> Path:
+    """Resolve the data dir at call time (honours CONFAS_HOME changes/tests)."""
+    return Path(os.environ.get("CONFAS_HOME", str(Path.home() / ".confas")))
 DROP_DIR = Path(os.environ.get("CONFAS_DROP", str(Path.home() / "ConFasDrop")))
 CONFIG_FILE = DATA_DIR / "config.json"
 LOG_FILE = DATA_DIR / "daemon.log"
@@ -55,6 +60,9 @@ DEFAULT_CONFIG = {
     "auto_target": "pdf",          # what dropped files are converted to by default
     "ml_enabled": True,
     "notify": True,
+    # --- full debugging layer: *.confas-debug.txt after every conversion --- #
+    "debug_reports": "always",      # always | onerror | off
+    "debug_keep": 200,              # central reports kept in ~/.confas/debug/
     # --- shared-learnings cloud sync (opt-in, aggregate stats only) ------ #
     "cloud_enabled": False,        # enable with: confas config cloud_sync=on
     "cloud_mode": "gist",          # "gist" (zero-backend) or "url" (own server)

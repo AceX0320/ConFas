@@ -207,13 +207,20 @@ class BanditSelector:
 
     # -- API used by engine -------------------------------------------------- #
     def rank(self, src: Path, dst_ext: str, routes: list) -> list:
-        """Return routes sorted best-first (stable, never drops fallbacks)."""
+        ranked, _ = self.rank_debug(src, dst_ext, routes)
+        return ranked
+
+    def rank_debug(self, src: Path, dst_ext: str, routes: list) -> tuple[list, dict]:
+        """Return (routes sorted best-first, debug info). Stable, never drops fallbacks."""
         if len(routes) <= 1:
-            return routes
+            return routes, {"enabled": True, "scores": {},
+                            "order_after": [r.name for r in routes],
+                            "history_samples": sum(self.bandit.n.values())}
         x = np.array(_features(src, dst_ext), dtype=float)
         pair_key = f"{src.suffix.lstrip('.').lower()}>{dst_ext.lstrip('.').lower()}"
 
         scored = []
+        scores: dict[str, float] = {}
         for pos, r in enumerate(routes):
             arm = f"{pair_key}|{r.name}"
             n = self.bandit.n.get(arm, 0)
@@ -225,9 +232,14 @@ class BanditSelector:
                 s = (r.weight / 100.0) * 0.35 + self.bandit.score(arm, x) * 0.0 \
                     + (self.bandit.score(arm, x) if n else 0.0)
                 s += 0.05 * (self.MIN_SAMPLES_TO_TRUST - n) / self.MIN_SAMPLES_TO_TRUST  # explore bonus
+            scores[r.name] = s
             scored.append((-s, -r.weight, pos, r))
         scored.sort(key=lambda t: (t[0], t[1], t[2]))
-        return [t[3] for t in scored]
+        ranked = [t[3] for t in scored]
+        info = {"enabled": True, "scores": scores,
+                "order_after": [r.name for r in ranked],
+                "history_samples": sum(self.bandit.n.values())}
+        return ranked, info
 
     def record(self, src: Path, dst_ext: str, backend: str, elapsed_ms: float, ok: bool) -> None:
         pair_key = f"{src.suffix.lstrip('.').lower()}>{dst_ext.lstrip('.').lower()}"
