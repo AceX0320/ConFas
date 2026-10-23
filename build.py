@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """One-shot builder: creates the Windows EXE with PyInstaller.
-
 Run on Windows:      python build.py
 Produces:            dist/ConFas.exe   (single file, windowed/no-console)
-
 The same script sanity-checks imports before freezing so you get an early,
 clear error instead of a broken EXE.
 """
@@ -33,6 +31,10 @@ def build() -> int:
         "--specpath", str(ROOT),
         "--paths", str(SRC),
         "--collect-all", "pdf2docx",
+        # pdf2docx's native deps were missing inside the frozen EXE (that is
+        # why BACKENDS.pdf2docx showed False on users' machines): bundle them.
+        "--collect-all", "fitz",             # PyMuPDF (pdf rendering/reflow)
+        "--collect-all", "cv2",              # OpenCV (pdf2docx layout analysis)
         "--hidden-import", "win32com.client",
         "--hidden-import", "pythoncom",
         "--hidden-import", "pywintypes",
