@@ -1,23 +1,19 @@
 """ConFas full debugging layer.
-
-After every conversion the engine writes a human-readable ``*.confas-debug.txt``
+After every conversion the engine writes a human-readable `*.confas-debug.txt`
 report next to the output file showing exactly what went right and what went
 wrong: environment, backend availability, the ordered candidate chain, ML
 ranking scores, every attempt (success or failure with full traceback), timing
 and byte counts.
-
-The layer is fail-safe by design: a broken/ unwritable report can NEVER break
+The layer is fail-safe by design: a broken/unwritable report can NEVER break
 or slow down an actual conversion (all writer errors are swallowed).
-
-Modes (config key ``debug_reports``, CLI ``ConFas.exe config debug=...``):
-    always  - write a report after every conversion            (default)
-    onerror - only write reports when a conversion failed
-    off     - never write reports
+Modes (config key `debug_reports`, CLI `ConFas.exe config debug=...`):
+  always  - write a report after every conversion            (default)
+  onerror - only write reports when a conversion failed
+  off     - never write reports
 Env override: CONFAS_DEBUG_REPORTS=always|onerror|off
-Retention:    the last ``debug_keep`` (default 200) reports are kept in the
+Retention:    the last `debug_keep` (default 200) reports are kept in the
               data dir; older ones are pruned automatically.
 """
-
 from __future__ import annotations
 
 import os
@@ -35,10 +31,9 @@ MODE_OFF = "off"
 
 _write_lock = threading.Lock()
 
-
-# --------------------------------------------------------------------------- #
-#  configuration
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
+# configuration
+# ---------------------------------------------------------------------------
 
 def _cfg_value(key: str, default):
     """Read a config value without hard-depending on monitor (test-safe)."""
@@ -47,7 +42,6 @@ def _cfg_value(key: str, default):
         return monitor.load_config().get(key, default)
     except Exception:
         return default
-
 
 def get_mode() -> str:
     m = os.environ.get("CONFAS_DEBUG_REPORTS") or _cfg_value("debug_reports", MODE_ALWAYS)
@@ -60,7 +54,6 @@ def get_mode() -> str:
         return MODE_OFF
     return MODE_ALWAYS
 
-
 def should_write(ok: bool) -> bool:
     mode = get_mode()
     if mode == MODE_OFF:
@@ -69,29 +62,25 @@ def should_write(ok: bool) -> bool:
         return not ok
     return True
 
-
 def keep_count() -> int:
     try:
         return max(10, int(_cfg_value("debug_keep", 200)))
     except Exception:
         return 200
 
-
-# --------------------------------------------------------------------------- #
-#  report writing
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
+# report writing
+# ---------------------------------------------------------------------------
 
 def _fmt_exc(exc: Optional[BaseException]) -> str:
     if exc is None:
         return ""
     return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
 
-
 def render_report(session: dict) -> str:
     """Render a session dict into the plain-text report."""
     L: list[str] = []
     bar = "=" * 78
-    sub = "-" * 78
     L.append(bar)
     L.append("ConFas CONVERSION DEBUG REPORT")
     L.append(bar)
@@ -102,14 +91,12 @@ def render_report(session: dict) -> str:
     if finished:
         L.append(f"Finished    : {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(finished))}")
     L.append("")
-
     L.append("[ENVIRONMENT]")
     L.append(f"  ConFas version : {session.get('version', '?')}")
     L.append(f"  OS             : {platform.platform()}")
     L.append(f"  Python         : {sys.version.split()[0]} ({'frozen EXE' if getattr(sys, 'frozen', False) else 'source'})")
     L.append(f"  Data dir       : {session.get('data_dir', '')}")
     L.append("")
-
     src = Path(session.get("src", ""))
     L.append("[INPUT / OUTPUT]")
     L.append(f"  Source         : {src}")
@@ -120,12 +107,10 @@ def render_report(session: dict) -> str:
     if session.get("bytes_out"):
         L.append(f"  Output size    : {session['bytes_out']:,} bytes")
     L.append("")
-
     L.append("[BACKEND AVAILABILITY]")
     for k, v in (session.get("backends") or {}).items():
         L.append(f"  {k:<14}: {v}")
     L.append("")
-
     ml = session.get("ml") or {}
     L.append("[ML BACKEND SELECTION]")
     L.append(f"  enabled        : {ml.get('enabled', False)}")
@@ -138,13 +123,11 @@ def render_report(session: dict) -> str:
         for arm, sc in sorted(ml["scores"].items(), key=lambda kv: -kv[1]):
             L.append(f"    {arm:<20}{sc:>10.3f}")
     L.append("")
-
     routes = session.get("routes", [])
     attempts = session.get("attempts", [])
     att_by_name: dict[str, list] = {}
     for a in attempts:
         att_by_name.setdefault(a["backend"], []).append(a)
-
     L.append("[CANDIDATE CHAIN & ATTEMPTS]")
     for i, r in enumerate(routes):
         mark = ">" if any(a["backend"] == r["name"] for a in attempts) else " "
@@ -161,7 +144,6 @@ def render_report(session: dict) -> str:
                     for line in tb.rstrip().splitlines():
                         L.append(f"        | {line}")
     L.append("")
-
     total_ms = session.get("total_ms", 0.0)
     ok = session.get("ok", False)
     L.append("[RESULT]")
@@ -179,17 +161,21 @@ def render_report(session: dict) -> str:
                  f"'{session.get('dst_ext')}' file at the planned location.")
         if nfail:
             L.append(f"    - fallback worked: {nfail} earlier backend(s) failed and the chain recovered.")
-    elif attempts:
+    else:
+        # FIX #1: Always show "What went WRONG" on failure, even if 0 attempts
         L.append("")
         L.append("  What went WRONG:")
-        for a in attempts:
-            if not a["ok"]:
-                L.append(f"    - backend '{a['backend']}': {a.get('error', '')[:300]}")
-        L.append("    - no remaining backend could produce the output; see tracebacks above.")
+        if attempts:
+            for a in attempts:
+                if not a["ok"]:
+                    L.append(f"    - backend '{a['backend']}': {a.get('error', '')[:300]}")
+            L.append("    - no remaining backend could produce the output; see tracebacks above.")
+        else:
+            err = session.get("final_error") or "no conversion path or backend available"
+            L.append(f"    - {err}")
     L.append(bar)
     L.append("End of report. (disable with `ConFas.exe config debug=off`)")
     return "\n".join(L) + "\n"
-
 
 def _prune(data_dir: Path, keep: int) -> None:
     try:
@@ -202,7 +188,6 @@ def _prune(data_dir: Path, keep: int) -> None:
                 pass
     except Exception:
         pass
-
 
 def new_session(src, dst_ext: str) -> dict:
     """Create a fresh debug session record (called at convert() entry)."""
@@ -239,7 +224,6 @@ def new_session(src, dst_ext: str) -> dict:
         "total_ms": 0.0,
     }
 
-
 def uuid_hex() -> str:
     try:
         import uuid
@@ -247,14 +231,12 @@ def uuid_hex() -> str:
     except Exception:
         return f"{time.time():.6f}"[-12:]
 
-
 def _backend_snapshot() -> dict:
     try:
         from .engine import BACKENDS
         return BACKENDS.summary()
     except Exception:
         return {}
-
 
 def finalize(sess: dict, result) -> None:
     """Close out a session and write its txt report. Never raises."""
@@ -266,26 +248,27 @@ def finalize(sess: dict, result) -> None:
     except Exception:
         pass
 
-
 def write_report(session: dict) -> Optional[Path]:
     """Write the debug txt report. Never raises - returns path or None."""
     try:
         if not should_write(bool(session.get("ok"))):
             return None
         text = render_report(session)
-
+        
         # primary copy: next to the converted file (only when one was actually
         # produced, otherwise the central copy below is the single source)
-        out = Path(session.get("out_path") or "")
+        out_path_str = session.get("out_path") or ""
         primary: Optional[Path] = None
-        if session.get("ok") and out.exists():
-            cand = out.with_name(out.name + ".confas-debug.txt")
-            try:
-                cand.write_text(text, encoding="utf-8")
-                primary = cand
-            except OSError:
-                primary = None
-
+        if session.get("ok") and out_path_str:
+            out = Path(out_path_str)
+            if out.exists():
+                cand = out.with_name(out.name + ".confas-debug.txt")
+                try:
+                    cand.write_text(text, encoding="utf-8")
+                    primary = cand
+                except OSError:
+                    primary = None
+                    
         # central copy: ~/.confas/debug/ (always, so failures are findable)
         try:
             from . import monitor
@@ -297,7 +280,8 @@ def write_report(session: dict) -> Optional[Path]:
             dd = data_dir / "debug"
             dd.mkdir(parents=True, exist_ok=True)
             stamp = time.strftime("%Y%m%d-%H%M%S")
-            stem = Path(session.get("src", "file")).stem[:60]
+            src_name = session.get("src") or "file"
+            stem = Path(src_name).stem[:60] if src_name else "file"
             status = "OK" if session.get("ok") else "FAIL"
             with _write_lock:
                 central = dd / f"{stamp}-{stem}-{status}.confas-debug.txt"
@@ -305,7 +289,6 @@ def write_report(session: dict) -> Optional[Path]:
                 _prune(dd, keep_count())
         except Exception:
             pass
-
         session["report_path"] = str(primary) if primary else ""
         return primary
     except Exception:
