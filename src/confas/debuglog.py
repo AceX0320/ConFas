@@ -162,7 +162,7 @@ def render_report(session: dict) -> str:
         if nfail:
             L.append(f"    - fallback worked: {nfail} earlier backend(s) failed and the chain recovered.")
     else:
-        # FIX #1: Always show "What went WRONG" on failure, even if 0 attempts
+        # Always show "What went WRONG" on failure, even with 0 attempts
         L.append("")
         L.append("  What went WRONG:")
         if attempts:
@@ -172,7 +172,7 @@ def render_report(session: dict) -> str:
             L.append("    - no remaining backend could produce the output; see tracebacks above.")
         else:
             err = session.get("final_error") or "no conversion path or backend available"
-            L.append(f"    - {err}")
+            L.append(f"    - error: {err}")
     L.append(bar)
     L.append("End of report. (disable with `ConFas.exe config debug=off`)")
     return "\n".join(L) + "\n"
@@ -254,7 +254,7 @@ def write_report(session: dict) -> Optional[Path]:
         if not should_write(bool(session.get("ok"))):
             return None
         text = render_report(session)
-        
+
         # primary copy: next to the converted file (only when one was actually
         # produced, otherwise the central copy below is the single source)
         out_path_str = session.get("out_path") or ""
@@ -268,7 +268,7 @@ def write_report(session: dict) -> Optional[Path]:
                     primary = cand
                 except OSError:
                     primary = None
-                    
+
         # central copy: ~/.confas/debug/ (always, so failures are findable)
         try:
             from . import monitor
