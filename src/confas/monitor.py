@@ -10,15 +10,15 @@ Startup registration - `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entr
                        so ConFas starts with Windows (appears under
                        Task Manager -> Startup apps).
 Context-menu         - per-extension shell keys (HKCU\Software\Classes) that add
-installer              "Convert with ConFas" rows to the Explorer right-click
-                       menu for every supported document type.  The verb is
-                       written to *every* location modern Windows consults:
+installer              "Convert with ConFas" + one "Convert to <FMT> with ConFas"
+                       row per sensible target to the Explorer right-click menu
+                       (classic menu / "Show more options" on Win11), and also
+                       registers ConFas under "Open with" so it is reachable
+                       from the Windows 11 first-level menu.  Verbs are written
+                       to *every* location modern Windows consults:
                          1. the effective ProgID (FileExts UserChoice),
                          2. SystemFileAssociations\.ext,
-                         3. the raw .ext class key (legacy),
-                       so the row appears no matter how the type is associated.
-                       On Windows 11 classic verbs live under
-                       "Show more options" (or Shift+Right-click).
+                         3. the raw .ext class key (legacy).
 No admin rights required, no external .dll handlers.
 Everything degrades gracefully on non-Windows systems (the pure-python parts
 are still importable there for development & CI testing).
@@ -50,15 +50,39 @@ CONFIG_FILE = DATA_DIR / "config.json"
 LOG_FILE = DATA_DIR / "daemon.log"
 PID_FILE = DATA_DIR / "daemon.pid"
 
-# extensions that get a right-click entry
+# extensions that get right-click entries
 MENU_EXTENSIONS = [
     "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp",
     "rtf", "txt", "md", "csv", "html", "htm", "epub",
     "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "avif", "heic", "jxl",
 ]
 
+# explicit target choices offered per extension in the classic right-click menu
+_FAMILY_TARGETS = {
+    "doc": ["pdf", "docx", "txt"], "docx": ["pdf", "txt", "md"],
+    "odt": ["docx", "pdf", "txt"], "rtf": ["docx", "pdf", "txt"],
+    "xls": ["xlsx", "pdf", "csv"], "xlsx": ["pdf", "csv", "txt"],
+    "ods": ["xlsx", "pdf", "csv"], "csv": ["xlsx", "pdf", "txt"],
+    "ppt": ["pptx", "pdf"], "pptx": ["pdf"], "odp": ["pptx", "pdf"],
+    "pdf": ["docx", "txt", "jpg"],
+    "txt": ["docx", "pdf", "html"], "md": ["docx", "pdf", "html"],
+    "html": ["docx", "pdf", "txt"], "htm": ["docx", "pdf", "txt"],
+    "epub": ["txt", "docx", "html"],
+    "png": ["jpg", "webp", "pdf"], "jpg": ["png", "webp", "pdf"],
+    "jpeg": ["png", "webp", "pdf"], "gif": ["png", "webp", "pdf"],
+    "bmp": ["png", "jpg", "pdf"], "tif": ["png", "jpg", "pdf"],
+    "tiff": ["png", "jpg", "pdf"], "webp": ["png", "jpg", "pdf"],
+    "avif": ["png", "jpg", "webp"], "heic": ["jpg", "png", "webp"],
+    "jxl": ["png", "jpg", "webp"],
+}
+
+
+def menu_targets(ext: str) -> list[str]:
+    return list(_FAMILY_TARGETS.get(ext, ["pdf"]))
+
+
 # --------------------------------------------------------------------------- #
-# Config
+#  Config
 # --------------------------------------------------------------------------- #
 
 DEFAULT_CONFIG = {
@@ -124,7 +148,7 @@ def _log(msg: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Startup registration  (Task Manager > Startup apps)
+#  Startup registration  (Task Manager > Startup apps)
 # --------------------------------------------------------------------------- #
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -175,15 +199,17 @@ def is_startup_registered() -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# Right-click context menu (per-extension HKCU shell verbs)
+#  Right-click context menu (per-extension HKCU shell verbs) + Open with
 # --------------------------------------------------------------------------- #
 
-VERB_NAME = "ConFas.Convert"
-VERB_LABEL = "Convert with ConFas"
+VERB_AUTO = "ConFas.Convert"
+OPENWITH_APP = "ConFas.exe"
 
 
-def _menu_cmd(placeholders: int) -> str:
-    args = ["convert"] + ["%1"] * placeholders
+def _verb_cmd(target: Optional[str]) -> str:
+    args = ["convert", "%1"]
+    if target:
+        args += ["-t", target]
     return subprocess.list2cmdline(launch_command(args))
 
 
@@ -214,7 +240,7 @@ def _legacy_progid(ext: str) -> str:
         return ""
 
 
-def _verb_targets(ext: str) -> list[str]:
+def _verb_locations(ext: str) -> list[str]:
     """All registry roots modern Windows consults for per-extension verbs."""
     targets = [rf"Software\Classes\SystemFileAssociations\.{ext}"]
     for progid in (_user_choice_progid(ext), _legacy_progid(ext)):
@@ -225,27 +251,27 @@ def _verb_targets(ext: str) -> list[str]:
     return targets
 
 
-def _write_verb(base: str) -> None:
+def _write_verb(base: str, verb: str, label: str, cmd: str) -> None:
     import winreg
-    verb = base + rf"\shell\{VERB_NAME}"
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, verb) as k:
-        winreg.SetValueEx(k, "MUIVerb", 0, winreg.REG_SZ, VERB_LABEL)
+    key = base + rf"\shell\{verb}"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
+        winreg.SetValueEx(k, "MUIVerb", 0, winreg.REG_SZ, label)
         winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, exe_path() + ",0")
         with winreg.CreateKey(k, "command") as kc:
-            winreg.SetValue(kc, "", winreg.REG_SZ, _menu_cmd(1))
+            winreg.SetValue(kc, "", winreg.REG_SZ, cmd)
 
 
-def _delete_verb(base: str) -> bool:
+def _delete_verb(base: str, verb: str) -> bool:
     import winreg
-    verb = base + rf"\shell\{VERB_NAME}"
+    key = base + rf"\shell\{verb}"
     try:
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, verb + r"\command")
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key + r"\command")
     except FileNotFoundError:
         pass
     except OSError:
         pass
     try:
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, verb)
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
         return True
     except FileNotFoundError:
         return False
@@ -253,40 +279,113 @@ def _delete_verb(base: str) -> bool:
         return False
 
 
-def install_context_menu(extensions: Optional[list[str]] = None) -> int:
-    """Create 'Convert with ConFas' entries for each extension.
+def _verbs_for(ext: str) -> list[tuple[str, str, str]]:
+    """(verb key name, menu label, command) tuples for one extension."""
+    out = [(VERB_AUTO, "Convert with ConFas (latest format)", _verb_cmd(None))]
+    for t in menu_targets(ext):
+        out.append((f"ConFas.To{t.capitalize()}",
+                    f"Convert to {t.upper()} with ConFas",
+                    _verb_cmd(t)))
+    return out
 
-    The verb is written to every location Explorer consults (effective
-    ProgID, SystemFileAssociations, raw .ext), so the row appears no matter
-    how the file type is associated.  Returns extensions handled.
+
+def _delete_key_tree(root, path: str) -> None:
+    import winreg
+    try:
+        with winreg.OpenKey(root, path) as k:
+            subs = []
+            i = 0
+            while True:
+                try:
+                    subs.append(winreg.EnumKey(k, i))
+                    i += 1
+                except OSError:
+                    break
+        for s in subs:
+            _delete_key_tree(root, path + "\\" + s)
+        winreg.DeleteKey(root, path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def _register_openwith(ext: str) -> None:
+    """Make ConFas appear in Explorer's 'Open with' (Windows 11 first menu)."""
+    import winreg
+    app = OPENWITH_APP
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                          rf"Software\Classes\Applications\{app}") as k:
+        winreg.SetValueEx(k, "FriendlyAppName", 0, winreg.REG_SZ, APP_NAME)
+        winreg.SetValueEx(k, "ApplicationDescription", 0, winreg.REG_SZ,
+                          "Ultra-fast local document converter")
+        with winreg.CreateKey(k, "DefaultIcon") as ki:
+            winreg.SetValue(ki, "", winreg.REG_SZ, exe_path() + ",0")
+        with winreg.CreateKey(k, r"shell\open\command") as kc:
+            winreg.SetValue(kc, "", winreg.REG_SZ, _verb_cmd(None))
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER,
+                          rf"Software\Classes\.{ext}\OpenWithList") as kol:
+        winreg.SetValueEx(kol, app, 0, winreg.REG_SZ, "")
+
+
+def _unregister_openwith(ext: str) -> None:
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            rf"Software\Classes\.{ext}\OpenWithList", 0,
+                            winreg.KEY_SET_VALUE) as kol:
+            winreg.DeleteValue(kol, OPENWITH_APP)
+    except Exception:
+        pass
+
+
+def install_context_menu(extensions: Optional[list[str]] = None) -> int:
+    """Create ConFas right-click entries (auto + per-target) for each extension.
+
+    Every verb is written to all locations Explorer consults (effective
+    ProgID, SystemFileAssociations, raw .ext), and the EXE is registered
+    under "Open with" so Windows 11's first-level menu can reach it too.
+    Returns number of extensions handled.
     """
     if not IS_WINDOWS:
         return 0
     exts = extensions or MENU_EXTENSIONS
     n = 0
     for ext in exts:
+        locations = _verb_locations(ext)
         ok = False
-        for t in _verb_targets(ext):
-            try:
-                _write_verb(t)
-                ok = True
-            except Exception as exc:
-                _log(f"context menu for .{ext} failed at {t}: {exc}")
+        for verb, label, cmd in _verbs_for(ext):
+            for loc in locations:
+                try:
+                    _write_verb(loc, verb, label, cmd)
+                    ok = True
+                except Exception as exc:
+                    _log(f"context menu .{ext} {verb} failed at {loc}: {exc}")
+        try:
+            _register_openwith(ext)
+        except Exception as exc:
+            _log(f"open-with registration for .{ext} failed: {exc}")
         if ok:
             n += 1
-    _log(f"context menu installed for {n}/{len(exts)} extensions")
+    _log(f"context menu installed for {n}/{len(exts)} extensions "
+         f"(auto + target verbs + open-with)")
     return n
 
 
 def remove_context_menu(extensions: Optional[list[str]] = None) -> int:
     if not IS_WINDOWS:
         return 0
+    import winreg
     exts = extensions or MENU_EXTENSIONS
     n = 0
     for ext in exts:
-        for base in _verb_targets(ext):
-            if _delete_verb(base):
-                n += 1
+        for base in _verb_locations(ext):
+            for verb, _label, _cmd in _verbs_for(ext):
+                if _delete_verb(base, verb):
+                    n += 1
+        _unregister_openwith(ext)
+    _delete_key_tree(winreg.HKEY_CURRENT_USER,
+                     rf"Software\Classes\Applications\{OPENWITH_APP}")
     _log(f"context menu removed ({n} verb keys deleted)")
     return n
 
@@ -309,7 +408,7 @@ def refresh_explorer() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Watch folder daemon
+#  Watch folder daemon
 # --------------------------------------------------------------------------- #
 
 class WatchFolder(threading.Thread):
@@ -381,7 +480,7 @@ class WatchFolder(threading.Thread):
 
 
 # --------------------------------------------------------------------------- #
-# Single-instance guard
+#  Single-instance guard
 # --------------------------------------------------------------------------- #
 
 def acquire_single_instance() -> bool:
@@ -422,7 +521,7 @@ def _pid_alive(pid: int) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# System tray daemon
+#  System tray daemon
 # --------------------------------------------------------------------------- #
 
 def run_daemon(headless: bool = False) -> int:
