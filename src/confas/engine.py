@@ -7,9 +7,9 @@ Strategy (fastest path first, newest format versions by default):
   * DOCX / XLSX / PPTX -> PDF : Microsoft Word/Excel/PowerPoint COM automation
         (the installed Office writes native OOXML; fastest & pixel-perfect on
         Windows machines that have Office).  Fallback: LibreOffice headless.
-  * PDF -> DOCX              : pdf2docx (preserves layout, tables, images)
-        Fallback: LibreOffice writer filter ``MS Word 2007 XML`` (= .docx,
-        OOXML 2007+ - NOT the legacy 97-2003 .doc format).
+  * PDF -> DOCX              : pdf2docx (preserves layout, tables, images),
+        then Microsoft Word PDF-reflow (Office COM), then LibreOffice writer
+        filter ``MS Word 2007 XML`` (= .docx, OOXML 2007+ - NOT legacy .doc).
   * Legacy Office (.doc/.xls/.ppt) -> modern (.docx/.xlsx/.pptx) :
         Office COM with FileFormat codes 12 / 51 / 24, or LibreOffice filters
         ``MS Word 2007 XML`` / ``MS Excel 2007 XML`` / ``MS PowerPoint 2007 XML``.
@@ -27,7 +27,6 @@ conversions are near-instant (no interpreter/COM spin-up per file).
 The module is import-safe on Linux/macOS as well (Windows-only backends are
 simply unavailable there) which makes development/testing possible anywhere.
 """
-
 from __future__ import annotations
 
 import json
@@ -47,6 +46,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 IS_WINDOWS = sys.platform == "win32"
+
 
 # --------------------------------------------------------------------------- #
 #  Registry helpers / public API surface
@@ -92,10 +92,8 @@ OFFICE_DOC_IN = {"doc", "docx", "odt", "rtf", "mht", "html", "htm", "txt", "wpd"
 OFFICE_SHEET_IN = {"xls", "xlsx", "ods", "csv", "txt"}
 OFFICE_SLIDE_IN = {"ppt", "pptx", "odp"}
 PDF_CAPABLE_IN = OFFICE_DOC_IN | OFFICE_SLIDE_IN | OFFICE_SHEET_IN | {"png", "jpg", "jpeg", "tif", "tiff", "epub", "xps"}
-
 IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp",
               "avif", "heic", "heif", "jxl", "ico", "ppm", "pgm", "pbm", "jp2"}
-
 TEXT_EXTS = {"txt", "md", "markdown", "csv", "tsv", "json", "xml", "html", "htm",
              "log", "ini", "py", "js", "c", "cpp", "h", "java", "yml", "yaml", "srt"}
 
@@ -174,10 +172,8 @@ class Backends:
                     break
             if not self.libreoffice:
                 self.libreoffice = shutil.which("soffice")
-
             try:  # only meaningful inside a Windows session
                 import winreg  # noqa: WPS433
-
                 for app, progid in (
                     ("word", "Word.Application"),
                     ("excel", "Excel.Application"),
@@ -194,7 +190,6 @@ class Backends:
                 pass
         else:
             self.libreoffice = shutil.which("soffice") or shutil.which("libreoffice")
-
         try:
             import PIL  # noqa: F401
             self.pillow = True
@@ -238,7 +233,7 @@ BackendFn = Callable[[Path, Path], None]
 
 
 def _unique(path: Path) -> Path:
-    """Return `path` if free, else name_1.ext, name_2.ext ..."""
+    """Return ``path`` if free, else name_1.ext, name_2.ext ..."""
     if not path.exists():
         return path
     stem, suf = path.stem, path.suffix
@@ -283,7 +278,7 @@ def lo_convert(src: Path, dst: Path, extra: Optional[list[str]] = None) -> None:
         "--convert-to", (f"{filt}" if filt else dst.suffix.lstrip(".")),
     ]
     if extra:
-        args[-1] += ":" + ",".join(extra)
+        args[-1] += ": " + ", ".join(extra)
     args += ["--outdir", str(outdir), str(src)]
     proc = subprocess.run(args, capture_output=True, timeout=300)
     produced = outdir / (src.stem + dst.suffix)
@@ -306,7 +301,11 @@ _FILEFORMAT = {  # https://learn.microsoft.com/office/vba/api/wdwdformat etc.
     "xlsx": 51,   # xlOpenXMLWorkbook
     "pptx": 24,   # ppSaveAsOpenXMLPresentation
     "mht": 10,
+    "html": 8,    # wdFormatHTML  (Word only)
+    "rtf": 6,     # wdFormatRTF   (Word only)
+    "txt": 2,     # wdFormatText  (Word only)
 }
+_WORD_ONLY_FMTS = {"html", "rtf", "txt"}
 
 
 def conv_office_com(src: Path, dst: Path) -> None:
@@ -314,7 +313,6 @@ def conv_office_com(src: Path, dst: Path) -> None:
         raise RuntimeError("Office COM requires Windows")
     import pythoncom  # type: ignore
     from win32com.client import DispatchEx, constants  # type: ignore
-
     pythoncom.CoInitialize()
     try:
         ext = dst.suffix.lstrip(".").lower()
@@ -325,26 +323,22 @@ def conv_office_com(src: Path, dst: Path) -> None:
             app_name = "powerpoint"
         else:
             app_name = "word"
-
         progid = BACKENDS.office_app.get(app_name)
         if not progid:
             raise RuntimeError(f"Microsoft {app_name.title()} not installed")
-
         app = DispatchEx(progid)
         try:
             app.Visible = False
         except Exception:
             pass
         try:
-            app.DisplayAlerts = False
+            app.DisplayAlerts = False     # also suppresses the Word PDF-reflow prompt
         except Exception:
             pass
-
         target = Path(dst)
         if target.exists():
             target = _unique(target)
         dst_abs = str(target.resolve())
-
         if app_name == "word":
             doc = app.Documents.Open(str(src.resolve()), ReadOnly=True)
             try:
@@ -381,7 +375,6 @@ def conv_office_com(src: Path, dst: Path) -> None:
         except Exception:
             pass
         pythoncom.CoUninitialize()
-
     out_file = Path(dst_abs)
     if not out_file.exists():
         raise RuntimeError("Office COM produced no output")
@@ -394,7 +387,6 @@ def conv_office_com(src: Path, dst: Path) -> None:
 
 def conv_pdf2docx(src: Path, dst: Path) -> None:
     from pdf2docx import Converter  # type: ignore
-
     cv = Converter(str(src))
     try:
         cv.convert(str(dst), start=0, end=None)
@@ -405,12 +397,11 @@ def conv_pdf2docx(src: Path, dst: Path) -> None:
 # ---- Pillow image pipeline (C-speed) --------------------------------------- #
 
 _IMG_QUALITY = {"jpg": 95, "jpeg": 95, "webp": 95, "avif": 60, "heic": 60,
-               "jxl": 90, "tiff": 90, "png": None}
+                "jxl": 90, "tiff": 90, "png": None}
 
 
 def conv_pillow(src: Path, dst: Path) -> None:
     from PIL import Image, ImageOps  # type: ignore
-
     ext = dst.suffix.lstrip(".").lower()
     if ext == "jpg":
         ext = "jpeg"
@@ -469,21 +460,19 @@ def conv_text_generic(src: Path, dst: Path) -> None:
         raise RuntimeError(f"unsupported text target .{ext}")
 
 
-_MD_HEURISTIC = re.compile(r"^(#{1,6}\s|[*-]\s|\d+\.\s|>\s|```|\*\*)", re.M)
+_MD_HEURISTIC = re.compile(r"^(#{1,6}\s|[*-]\s|\d+.\s|>\s|`|\*\*)", re.M)
 
 
 def conv_text_to_docx(src: Path, dst: Path) -> None:
     import docx  # type: ignore
     from docx.enum.text import WD_ALIGN_PARAGRAPH  # type: ignore
     from docx.shared import Pt  # type: ignore
-
     text, _ = _read_text_auto(src)
     lines = text.splitlines()
     d = docx.Document()
     style = d.styles["Normal"]
     style.font.name = "Calibri"
     style.font.size = Pt(11)
-
     md = src.suffix.lstrip(".").lower() in ("md", "markdown") or bool(_MD_HEURISTIC.search(text[:4000]))
     in_code = False
     code_buf: list[str] = []
@@ -519,7 +508,7 @@ def conv_text_to_docx(src: Path, dst: Path) -> None:
 
 def _add_rich_md_paragraph(doc, line: str, md: bool) -> None:
     p = doc.add_paragraph()
-    if not md or "**" not in line and "`" not in line:
+    if not md or ("**" not in line and "`" not in line):
         p.add_run(line)
         return
     parts = re.split(r"(\*\*.+?\*\*|`.+?`)", line)
@@ -541,7 +530,6 @@ def conv_html_to_docx(src: Path, dst: Path) -> None:
 def conv_epub_extract(src: Path, dst: Path) -> None:
     import zipfile
     from xml.etree import ElementTree as ET
-
     texts: list[str] = []
     with zipfile.ZipFile(src) as z:
         names = [n for n in z.namelist() if n.lower().endswith((".xhtml", ".html", ".htm"))]
@@ -592,7 +580,6 @@ def conv_epub_extract(src: Path, dst: Path) -> None:
 
 def conv_docx_to_text(src: Path, dst: Path) -> None:
     import docx  # type: ignore
-
     d = docx.Document(str(src))
     lines = [p.text for p in d.paragraphs]
     for t in d.tables:
@@ -604,7 +591,6 @@ def conv_docx_to_text(src: Path, dst: Path) -> None:
 def conv_image_to_pdf(src: Path, dst: Path) -> None:
     if BACKENDS.pillow:
         from PIL import Image  # type: ignore
-
         with Image.open(src) as im:
             if im.mode != "RGB":
                 im = im.convert("RGB")
@@ -646,22 +632,23 @@ def _routes_for(src_ext: str, dst_ext: str) -> list[Route]:
         routes.append(Route(name, fn, w))
 
     office_available = IS_WINDOWS and bool(BACKENDS.office_app)
+    word_available = office_available and "word" in BACKENDS.office_app
 
     # same family shortcuts ---------------------------------------------------
     if s in IMAGE_EXTS and d in IMAGE_EXTS:
         if BACKENDS.pillow:
             add("pillow", conv_pillow, 100)
         add("libreoffice", conv_libreoffice, 20)
-
     elif s == "pdf" and d == "docx":
         if BACKENDS.pdf2docx:
             add("pdf2docx", conv_pdf2docx, 90)
+        if word_available:
+            # Word 2013+ PDF reflow: excellent for text-centric PDFs
+            add("office-com", conv_office_com, 80)
         add("libreoffice", conv_libreoffice, 60)
-
     elif s == "pdf" and d in ("txt", "md", "csv"):
         add("pypdf", conv_pdf_to_text, 90)
         add("libreoffice", conv_libreoffice, 40)
-
     elif s == "pdf" and d in ("jpg", "jpeg", "png", "webp"):
         if BACKENDS.pillow:
             def pdf_img(src: Path, dst: Path, sub=0) -> None:
@@ -681,19 +668,20 @@ def _routes_for(src_ext: str, dst_ext: str) -> list[Route]:
             except ImportError:
                 pass
         add("libreoffice", conv_libreoffice, 30)
-
     elif s in IMAGE_EXTS and d == "pdf":
         if BACKENDS.pillow:
             add("pillow-pdf", conv_image_to_pdf, 100)
         add("libreoffice", conv_libreoffice, 30)
-
     elif s in ("docx",) and d in TEXT_EXTS - {"docx"}:
         if s == "docx" and d in ("txt", "md", "log"):
             add("python-docx", conv_docx_to_text, 90)
+        if word_available and d in _WORD_ONLY_FMTS:
+            add("office-com", conv_office_com, 45)
         add("libreoffice", conv_libreoffice, 50)
-
     elif s in TEXT_EXTS and d == "pdf":
-        # two-step fast path: text -> docx -> pdf (needs a PDF producer later)
+        if word_available:
+            # Word opens txt/md/html and exports a perfect PDF
+            add("office-com", conv_office_com, 85)
         if BACKENDS.libreoffice:
             add("libreoffice", conv_libreoffice, 60)
         elif BACKENDS.python_docx:
@@ -708,49 +696,42 @@ def _routes_for(src_ext: str, dst_ext: str) -> list[Route]:
                         raise RuntimeError(
                             "PDF generation needs LibreOffice or Microsoft Office installed")
             add("text->docx->pdf", text_pdf_two_step, 40)
-
     elif s in TEXT_EXTS and d == "docx":
         if BACKENDS.python_docx:
             if s in ("html", "htm"):
                 add("libreoffice-html", conv_html_to_docx, 80)
             add("python-docx-md", conv_text_to_docx, 70)
         add("libreoffice", conv_libreoffice, 50)
-
     elif s == "epub":
         if BACKENDS.python_docx and d == "docx":
             add("epub->docx", conv_epub_extract, 80)
         if d in ("txt", "md", "html", "htm"):
             add("epub-extract", conv_epub_extract, 90)
         add("libreoffice", conv_libreoffice, 30)
-
     elif s in ("doc", "xls", "ppt", "odt", "ods", "odp", "rtf") and d in ("docx", "xlsx", "pptx", "pdf"):
         if office_available:
             add("office-com", conv_office_com, 100)
         add("libreoffice", conv_libreoffice, 70)
-
     elif s in OFFICE_DOC_IN | OFFICE_SHEET_IN | OFFICE_SLIDE_IN and d == "pdf":
         if office_available:
             add("office-com", conv_office_com, 100)
         add("libreoffice", conv_libreoffice, 70)
-
     elif s in OFFICE_DOC_IN and d in ("docx", "odt", "rtf", "html"):
         if office_available:
             add("office-com", conv_office_com, 100)
         add("libreoffice", conv_libreoffice, 70)
         if BACKENDS.python_docx and d == "docx":
             add("python-docx-md", conv_text_to_docx, 65)
-
     elif s in ("docx", "xlsx", "pptx") and d in ("pdf", "odt", "ods", "odp", "rtf", "html", "txt", "csv"):
         if office_available and d == "pdf":
             add("office-com", conv_office_com, 100)
+        elif word_available and s == "docx" and d in _WORD_ONLY_FMTS:
+            add("office-com", conv_office_com, 45)
         add("libreoffice", conv_libreoffice, 70)
-
     elif s in TEXT_EXTS and d in TEXT_EXTS:
         add("text-passthru", conv_text_generic, 100)
-
     elif s in ("txt", "md") and d in ("html", "htm"):
         add("text-passthru", conv_text_generic, 100)
-
     else:
         # last-resort generic chain
         if s in TEXT_EXTS and d in TEXT_EXTS:
@@ -791,7 +772,6 @@ class ConversionEngine:
             try:
                 from .learning import BanditSelector
                 from .monitor import DATA_DIR   # honours CONFAS_HOME env var
-
                 self._selector = BanditSelector(history_file or (DATA_DIR / "history.jsonl"))
             except Exception:
                 self._selector = None
@@ -815,7 +795,6 @@ class ConversionEngine:
         from . import debuglog
         from .debuglog import _fmt_exc
         sess = debuglog.new_session(src, dst_ext)
-
         src = Path(src)
         if not src.exists():
             res = ConversionResult(str(src), "", "-", 0, False, "source file not found")
@@ -830,7 +809,6 @@ class ConversionEngine:
                         planned_out="", out_path="")
             debuglog.finalize(sess, res)
             return res
-
         base = Path(out_path) if out_path else (Path(out_dir) if out_dir else src.parent) / (src.stem + dst_ext)
         base = _unique(Path(base))
         sess["planned_out"] = str(base)
@@ -839,7 +817,6 @@ class ConversionEngine:
             sess["bytes_in"] = src.stat().st_size
         except OSError:
             pass
-
         routes = _routes_for(src.suffix, dst_ext)
         sess["routes_static"] = [r.name for r in routes]
         if self._selector:
@@ -853,7 +830,6 @@ class ConversionEngine:
             sess.update(ok=False, final_error=res.error, attempts=[])
             debuglog.finalize(sess, res)
             return res
-
         t0 = time.perf_counter()
         err = ""
         attempts: list[dict] = []
@@ -921,4 +897,4 @@ def get_engine(**kw) -> ConversionEngine:
     with _ENGINE_LOCK:
         if ENGINE_SINGLETON is None:
             ENGINE_SINGLETON = ConversionEngine(**kw)
-        return ENGINE_SINGLETON
+    return ENGINE_SINGLETON
