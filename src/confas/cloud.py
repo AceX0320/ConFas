@@ -484,7 +484,7 @@ def merge_gist_worker(gist_id: Optional[str] = None, token_: Optional[str] = Non
     Used by the scheduled GitHub Action so contributors only ever PATCH their
     own file (no lost-update races on the aggregate).
     """
-    gid = gist_id or os.environ.get("CONFAS_GIST_ID") or DEFAULT_GIST_ID
+        gid = gist_id or os.environ.get("CONFAS_GIST_ID") or DEFAULT_GIST_ID
     tok = token_ or token()
     headers = {"Authorization": f"Bearer {tok}"} if tok else {}
     data = _request(f"{API_ROOT}/gists/{gid}", headers=headers)
