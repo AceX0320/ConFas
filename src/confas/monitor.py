@@ -1,22 +1,28 @@
 r"""ConFas always-on services:
 
-  1. Tray daemon        - runs forever, shows an icon in the notification area
-                          (Task Manager > Startup apps friendly), lets you
-                          pause/quit and open your watch folder.
-  2. Watch-folder       - drop any document into `%USERPROFILE%/ConFasDrop` (or a folder
-     watcher              you pick) and it is converted automatically to its
-                          "latest generation" format using the engine + ML.
-  3. Startup registration - HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry so ConFas starts with Windows
-                          (appears under Task Manager -> Startup apps).
-  4. Context-menu       - per-extension shell keys (HKCU\Software\Classes)
-     installer            that add "Convert with ConFas" rows to the Explorer
-                          right-click menu for every supported document type.
-                          No admin rights required, no external .dll handlers.
-
+Tray daemon          - runs forever, shows an icon in the notification area
+                       (Task Manager > Startup apps friendly), lets you
+                       pause/quit and open your watch folder.
+Watch-folder         - drop any document into `%USERPROFILE%/ConFasDrop` (or a folder
+watcher              you pick) and it is converted automatically to its
+                       "latest generation" format using the engine + ML.
+Startup registration - `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry
+                       so ConFas starts with Windows (appears under
+                       Task Manager -> Startup apps).
+Context-menu         - per-extension shell keys (HKCU\Software\Classes) that add
+installer              "Convert with ConFas" rows to the Explorer right-click
+                       menu for every supported document type.  The verb is
+                       written to *every* location modern Windows consults:
+                         1. the effective ProgID (FileExts UserChoice),
+                         2. SystemFileAssociations\.ext,
+                         3. the raw .ext class key (legacy),
+                       so the row appears no matter how the type is associated.
+                       On Windows 11 classic verbs live under
+                       "Show more options" (or Shift+Right-click).
+No admin rights required, no external .dll handlers.
 Everything degrades gracefully on non-Windows systems (the pure-python parts
 are still importable there for development & CI testing).
 """
-
 from __future__ import annotations
 
 import json
@@ -29,14 +35,16 @@ from pathlib import Path
 from typing import Optional
 
 IS_WINDOWS = sys.platform == "win32"
-
 APP_NAME = "ConFas"
+
 DATA_DIR = Path(os.environ.get("CONFAS_HOME", str(Path.home() / ".confas")))
 
 
 def data_dir() -> Path:
     """Resolve the data dir at call time (honours CONFAS_HOME changes/tests)."""
     return Path(os.environ.get("CONFAS_HOME", str(Path.home() / ".confas")))
+
+
 DROP_DIR = Path(os.environ.get("CONFAS_DROP", str(Path.home() / "ConFasDrop")))
 CONFIG_FILE = DATA_DIR / "config.json"
 LOG_FILE = DATA_DIR / "daemon.log"
@@ -49,9 +57,8 @@ MENU_EXTENSIONS = [
     "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "avif", "heic", "jxl",
 ]
 
-
 # --------------------------------------------------------------------------- #
-#  Config
+# Config
 # --------------------------------------------------------------------------- #
 
 DEFAULT_CONFIG = {
@@ -64,12 +71,12 @@ DEFAULT_CONFIG = {
     "debug_reports": "always",      # always | onerror | off
     "debug_keep": 200,              # central reports kept in ~/.confas/debug/
     # --- shared-learnings cloud sync (opt-in, aggregate stats only) ------ #
-    "cloud_enabled": False,        # enable with: confas config cloud_sync=on
-    "cloud_mode": "gist",          # "gist" (zero-backend) or "url" (own server)
+    "cloud_enabled": False,         # enable with: confas config cloud_sync=on
+    "cloud_mode": "gist",           # "gist" (zero-backend) or "url" (own server)
     "cloud_gist_id": "REPLACE_WITH_YOUR_GIST_ID",
-    "cloud_url": "",               # used when cloud_mode=url
-    "cloud_interval_s": 900,       # background push/pull cadence
-    "cloud_debounce_s": 60,        # min seconds between uploads
+    "cloud_url": "",                # used when cloud_mode=url
+    "cloud_interval_s": 900,        # background push/pull cadence
+    "cloud_debounce_s": 60,         # min seconds between uploads
     "cloud_pull_on_start": True,
 }
 
@@ -117,7 +124,7 @@ def _log(msg: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-#  Startup registration  (Task Manager > Startup apps)
+# Startup registration  (Task Manager > Startup apps)
 # --------------------------------------------------------------------------- #
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -129,9 +136,9 @@ def register_startup() -> bool:
         return False
     try:
         import winreg
-
         cmd = subprocess.list2cmdline(launch_command(["run"]))
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                            winreg.KEY_SET_VALUE) as k:
             winreg.SetValueEx(k, APP_NAME, 0, winreg.REG_SZ, cmd)
         _log(f"startup registered: {cmd}")
         return True
@@ -145,8 +152,8 @@ def unregister_startup() -> bool:
         return False
     try:
         import winreg
-
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                            winreg.KEY_SET_VALUE) as k:
             winreg.DeleteValue(k, APP_NAME)
         return True
     except FileNotFoundError:
@@ -160,7 +167,6 @@ def is_startup_registered() -> bool:
         return False
     try:
         import winreg
-
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
             winreg.QueryValueEx(k, APP_NAME)
         return True
@@ -169,51 +175,105 @@ def is_startup_registered() -> bool:
 
 
 # --------------------------------------------------------------------------- #
-#  Right-click context menu (per-extension HKCU shell verbs)
+# Right-click context menu (per-extension HKCU shell verbs)
 # --------------------------------------------------------------------------- #
+
+VERB_NAME = "ConFas.Convert"
+VERB_LABEL = "Convert with ConFas"
+
 
 def _menu_cmd(placeholders: int) -> str:
     args = ["convert"] + ["%1"] * placeholders
     return subprocess.list2cmdline(launch_command(args))
 
 
+def _user_choice_progid(ext: str) -> str:
+    """ProgID Windows actually uses for .ext (FileExts UserChoice)."""
+    if not IS_WINDOWS:
+        return ""
+    try:
+        import winreg
+        path = (rf"Software\Microsoft\Windows\CurrentVersion"
+                rf"\Explorer\FileExts\.{ext}\UserChoice")
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as k:
+            return str(winreg.QueryValueEx(k, "ProgId")[0] or "").strip()
+    except Exception:
+        return ""
+
+
+def _legacy_progid(ext: str) -> str:
+    """ProgID stored as default value of the .ext class key (old style)."""
+    if not IS_WINDOWS:
+        return ""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            rf"Software\Classes\.{ext}") as k:
+            return str(winreg.QueryValue(k, "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _verb_targets(ext: str) -> list[str]:
+    """All registry roots modern Windows consults for per-extension verbs."""
+    targets = [rf"Software\Classes\SystemFileAssociations\.{ext}"]
+    for progid in (_user_choice_progid(ext), _legacy_progid(ext)):
+        candidate = rf"Software\Classes\{progid}" if progid else ""
+        if candidate and candidate not in targets:
+            targets.append(candidate)
+    targets.append(rf"Software\Classes\.{ext}")
+    return targets
+
+
+def _write_verb(base: str) -> None:
+    import winreg
+    verb = base + rf"\shell\{VERB_NAME}"
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, verb) as k:
+        winreg.SetValueEx(k, "MUIVerb", 0, winreg.REG_SZ, VERB_LABEL)
+        winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, exe_path() + ",0")
+        with winreg.CreateKey(k, "command") as kc:
+            winreg.SetValue(kc, "", winreg.REG_SZ, _menu_cmd(1))
+
+
+def _delete_verb(base: str) -> bool:
+    import winreg
+    verb = base + rf"\shell\{VERB_NAME}"
+    try:
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, verb + r"\command")
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+    try:
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, verb)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+
 def install_context_menu(extensions: Optional[list[str]] = None) -> int:
-    """Create 'Convert with ConFas' entries for each extension. Returns count."""
+    """Create 'Convert with ConFas' entries for each extension.
+
+    The verb is written to every location Explorer consults (effective
+    ProgID, SystemFileAssociations, raw .ext), so the row appears no matter
+    how the file type is associated.  Returns extensions handled.
+    """
     if not IS_WINDOWS:
         return 0
-    import winreg
-
     exts = extensions or MENU_EXTENSIONS
     n = 0
     for ext in exts:
-        base = rf"Software\Classes\.{ext}"
-        try:
-            # file type may not exist in HKCU yet; create our own subkey chain
-            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, base) as k_ext:
-                progid = winreg.QueryValue(k_ext, "")   # associated ProgID, may fail
-        except FileNotFoundError:
-            progid = ""
-        except OSError:
-            progid = ""
-
-        # If a ProgID exists, attach under it (cleanest); else under .ext directly
-        targets = []
-        if progid:
-            targets.append(rf"Software\Classes\{progid}\shell\ConFas.Convert")
-        targets.append(base + r"\shell\ConFas.Convert")
-
-        for t in targets:
+        ok = False
+        for t in _verb_targets(ext):
             try:
-                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, t) as k:
-                    winreg.SetValueEx(k, "MUIVerb", 0, winreg.REG_SZ, "Convert with ConFas")
-                    winreg.SetValueEx(k, "Icon", 0, winreg.REG_SZ, exe_path() + ",0")
-                    winreg.SetValueEx(k, "MultiSelectedModel", 0, winreg.REG_SZ, "ConFas")
-                    with winreg.CreateKey(k, "command") as kc:
-                        winreg.SetValue(kc, "", winreg.REG_SZ, _menu_cmd(1))
-                n += 1
-                break  # one successful attachment is enough
+                _write_verb(t)
+                ok = True
             except Exception as exc:
                 _log(f"context menu for .{ext} failed at {t}: {exc}")
+        if ok:
+            n += 1
     _log(f"context menu installed for {n}/{len(exts)} extensions")
     return n
 
@@ -221,29 +281,13 @@ def install_context_menu(extensions: Optional[list[str]] = None) -> int:
 def remove_context_menu(extensions: Optional[list[str]] = None) -> int:
     if not IS_WINDOWS:
         return 0
-    import winreg
-
     exts = extensions or MENU_EXTENSIONS
     n = 0
     for ext in exts:
-        for base in (rf"Software\Classes\.{ext}",):
-            try:
-                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, base) as k:
-                    progid = winreg.QueryValue(k, "") or ""
-            except FileNotFoundError:
-                progid = ""
-            paths = []
-            if progid:
-                paths.append(rf"Software\Classes\{progid}\shell\ConFas.Convert")
-            paths.append(base + r"\shell\ConFas.Convert")
-            for p in paths:
-                try:
-                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, p)
-                    n += 1
-                except FileNotFoundError:
-                    pass
-                except Exception:
-                    pass
+        for base in _verb_targets(ext):
+            if _delete_verb(base):
+                n += 1
+    _log(f"context menu removed ({n} verb keys deleted)")
     return n
 
 
@@ -253,7 +297,6 @@ def refresh_explorer() -> None:
         return
     try:
         import ctypes
-
         HWND_BROADCAST = 0xFFFF
         WM_SETTINGCHANGE = 0x1A
         SHChangeNotify = ctypes.windll.shell32.SHChangeNotify  # type: ignore[attr-defined]
@@ -266,7 +309,7 @@ def refresh_explorer() -> None:
 
 
 # --------------------------------------------------------------------------- #
-#  Watch folder daemon
+# Watch folder daemon
 # --------------------------------------------------------------------------- #
 
 class WatchFolder(threading.Thread):
@@ -285,7 +328,6 @@ class WatchFolder(threading.Thread):
 
     def run(self) -> None:
         from .engine import newest_target_for, get_engine
-
         self.folder.mkdir(parents=True, exist_ok=True)
         _log(f"watching {self.folder} (auto target: {self.cfg.get('auto_target')})")
         while not self.stop_event.is_set():
@@ -339,7 +381,7 @@ class WatchFolder(threading.Thread):
 
 
 # --------------------------------------------------------------------------- #
-#  Single-instance guard
+# Single-instance guard
 # --------------------------------------------------------------------------- #
 
 def acquire_single_instance() -> bool:
@@ -360,7 +402,6 @@ def _pid_alive(pid: int) -> bool:
     if IS_WINDOWS:
         try:
             import ctypes
-
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             STILL_ACTIVE = 259
             k32 = ctypes.windll.kernel32
@@ -381,7 +422,7 @@ def _pid_alive(pid: int) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-#  System tray daemon
+# System tray daemon
 # --------------------------------------------------------------------------- #
 
 def run_daemon(headless: bool = False) -> int:
@@ -390,16 +431,13 @@ def run_daemon(headless: bool = False) -> int:
     if not acquire_single_instance():
         _log("another instance already running; exiting")
         return 0
-
     DROP_DIR.mkdir(parents=True, exist_ok=True)
     Path(cfg["watch_folder"]).mkdir(parents=True, exist_ok=True)
-
     watch = None
     if cfg.get("watch_enabled", True):
         watch = WatchFolder(Path(cfg["watch_folder"]), cfg)
         watch.start()
         globals()["_ACTIVE_WATCH"] = watch
-
     if headless or not IS_WINDOWS:
         _log(f"daemon started headless (pid {os.getpid()})")
         try:
