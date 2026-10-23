@@ -13,8 +13,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install -r requirements.txt pytest
-      - run: python -m pytest tests/ -v
+      - name: Install test dependencies (slim = same matrix as verified local runs)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest numpy Pillow python-docx pypdf chardet charset-normalizer
+      - name: Run tests
+        run: python -m pytest tests/ -v
 
   exe:
     needs: test
