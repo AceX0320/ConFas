@@ -1,7 +1,5 @@
 """ConFas command line interface.
-
 This is what the Windows right-click menu invokes:
-
     ConFas.exe convert "C:\\path\\file.pdf"              # -> newest generation (docx)
     ConFas.exe convert "C:\\path\\file.pdf" -t docx      # explicit target
     ConFas.exe convert file1 file2 file3 -t pdf          # batch, parallel
@@ -10,7 +8,6 @@ This is what the Windows right-click menu invokes:
     ConFas.exe uninstall
     ConFas.exe status | stats | config
 """
-
 from __future__ import annotations
 
 import argparse
@@ -20,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__
+from . import __version__ as version
 from .engine import get_engine, newest_target_for, BACKENDS, _norm_ext
 from . import monitor
 from . import debuglog as _dbg
@@ -47,7 +44,6 @@ def _popup(title: str, text: str) -> None:
     if monitor.IS_WINDOWS and os.environ.get("CONFAS_NO_POPUP") != "1":
         try:
             import ctypes
-
             MB_OK = 0x0
             MB_ICONINFORMATION = 0x40
             MB_ICONWARNING = 0x30
@@ -90,7 +86,6 @@ def cmd_convert(args) -> int:
     if not files:
         print("No input files found.", file=sys.stderr)
         return 2
-
     jobs: list[tuple[str, str]] = []
     for f in files:
         t = args.target
@@ -98,7 +93,6 @@ def cmd_convert(args) -> int:
             sugg = newest_target_for(f.suffix)
             t = sugg[0] if sugg else "pdf"
         jobs.append((str(f), t))
-
     engine = get_engine(enable_ml=not args.no_ml)
     # (progress printed per file as conversions finish)
     results = []
@@ -120,19 +114,14 @@ def cmd_convert(args) -> int:
     t0 = time.perf_counter()
     engine.convert_many(jobs, progress=on_done)
     total_ms = (time.perf_counter() - t0) * 1000
-
     ok_n = sum(1 for r in results if r.ok)
     fail_n = len(results) - ok_n
     print(f"\n{ok_n} converted, {fail_n} failed - total {total_ms:.0f} ms")
-
-    # When invoked from the shell context menu give visual feedback.
-    if getattr(sys, "frozen", False) or args.popup:
-        if fail_n == 0:
-            outs = "\n".join(Path(r.target).name for r in results)
-            _popup("ConFas", f"Converted {ok_n} file(s):\n{outs}\n({total_ms:.0f} ms)")
-        else:
-            errs = "\n".join(f"{Path(r.source).name}: {r.error}" for r in results if not r.ok)
-            _popup("ConFas - errors", f"{fail_n} conversion(s) failed:\n{errs[:900]}")
+    # Visual feedback policy: successes stay SILENT (the converted file
+    # appearing next to the original is the confirmation); only failures pop.
+    if (getattr(sys, "frozen", False) or args.popup) and fail_n:
+        errs = "\n".join(f"{Path(r.source).name}: {r.error}" for r in results if not r.ok)
+        _popup("ConFas - errors", f"{fail_n} conversion(s) failed:\n{errs[:900]}")
     return 0 if fail_n == 0 else 1
 
 
@@ -145,7 +134,6 @@ def cmd_install(args) -> int:
     monitor.DATA_DIR.mkdir(parents=True, exist_ok=True)
     monitor.save_config(monitor.load_config())
     Path(monitor.DEFAULT_CONFIG["watch_folder"]).mkdir(exist_ok=True)
-
     if monitor.IS_WINDOWS:
         n = monitor.install_context_menu()
         print(f"  right-click menu entries installed : {n} extensions")
@@ -172,7 +160,7 @@ def cmd_uninstall(args) -> int:
 def cmd_status(args) -> int:
     cfg = monitor.load_config()
     info = {
-        "version": __version__,
+        "version": version,
         "platform": sys.platform,
         "backends": BACKENDS.summary(),
         "startup_registered": monitor.is_startup_registered(),
@@ -208,10 +196,10 @@ def cmd_stats(args) -> int:
         for arm, items in sorted(by_arm.items(), key=lambda kv: -len(kv[1])):
             oks = sum(1 for i in items if i["ok"])
             avg = sum(i["ms"] for i in items) / max(len(items), 1)
-            print(f"{pair:<14}{arm:<16}{len(items):>5}{100*oks//len(items):>5}%"
+            print(f"{pair:<14}{arm:<16}{len(items):>5}{100 * oks // len(items):>5}% "
                   f"{avg:>9.0f}")
     ml_on = bool(monitor.load_config().get("ml_enabled")) and os.environ.get("CONFAS_DISABLE_ML") != "1"
-    print(f"\nML backend-selection: {'ENABLED' if ml_on else 'disabled'} "
+    print(f"\nML backend-selection: {'ENABLED' if ml_on else 'disabled'}  "
           f"(toggle with `confas config ml=off` or CONFAS_DISABLE_ML=1)")
     # cloud sync status
     try:
@@ -220,7 +208,7 @@ def cmd_stats(args) -> int:
         sel_stub = _StubSelector()
         cs = CloudSync(sel_stub, cfg)
         gist_cfgured = (cfg.get("cloud_gist_id") or "") not in ("", DEFAULT_GIST_ID)
-        print(f"Cloud learnings sync: {'ON' if cs.enabled() else 'off'} "
+        print(f"Cloud learnings sync: {'ON' if cs.enabled() else 'off'}  "
               f"(mode={cs.mode}, endpoint={'set' if cs.enabled() else 'not configured'})")
         if not cs.enabled() and not gist_cfgured and not cfg.get("cloud_url"):
             print("  -> share your ML improvements with other users:")
@@ -228,11 +216,11 @@ def cmd_stats(args) -> int:
             print("     setx CONFAS_CLOUD_TOKEN <github-pat-with-gist-scope>")
             print("     ConFas.exe config cloud_sync=on   (see README: Shared learnings)")
         elif cs.cfg.get("cloud_last_pull"):
-            print(f"  last pull: {time.strftime('%Y-%m-%d %H:%M', time.localtime(cs.cfg['cloud_last_pull']))}"
+            print(f"  last pull: {time.strftime('%Y-%m-%d %H:%M', time.localtime(cs.cfg['cloud_last_pull']))} "
                   f" | last push: "
                   f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(cs.cfg['cloud_last_push'])) if cs.cfg.get('cloud_last_push') else 'never'}")
-            if cs.cfg.get("cloud_last_sha256"):
-                print(f"  pooled state sha256: {cs.cfg['cloud_last_sha256']}")
+        if cs.cfg.get("cloud_last_sha256"):
+            print(f"  pooled state sha256: {cs.cfg['cloud_last_sha256']}")
         if cs.enabled():
             print("  security: HTTPS-only, aggregate numbers only (no file names/"
                   "paths/content), remote state fully validated before import.")
@@ -320,11 +308,10 @@ def cmd_targets(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ConFas",
-        description=f"ConFas v{__version__} - ultra-fast local document converter "
+        description=f"ConFas v{version} - ultra-fast local document converter "
                     "(right-click menu + watch folder + adaptive ML routing)",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
-
     c = sub.add_parser("convert", help="convert one or more documents")
     c.add_argument("files", nargs="+", help="source file(s)")
     c.add_argument("-t", "--target", default=None,
@@ -332,28 +319,21 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--no-ml", action="store_true", help="disable adaptive backend learning")
     c.add_argument("--popup", action="store_true", help="show result popup even when not frozen")
     c.set_defaults(fn=cmd_convert)
-
     r = sub.add_parser("run", help="run the always-on daemon (tray + watch folder)")
     r.add_argument("--headless", action="store_true", help="no tray icon")
     r.set_defaults(fn=cmd_run)
-
     i = sub.add_parser("install", help="add to Startup apps + install right-click menu")
     i.set_defaults(fn=cmd_install)
-
     u = sub.add_parser("uninstall", help="remove startup entry + context menu")
     u.set_defaults(fn=cmd_uninstall)
-
     s = sub.add_parser("status", help="show detected backends & registration state")
     s.set_defaults(fn=cmd_status)
-
     st = sub.add_parser("stats", help="show learned conversion performance")
     st.add_argument("--limit", type=int, default=200)
     st.set_defaults(fn=cmd_stats)
-
     cf = sub.add_parser("config", help="show/set configuration (key=value ...)")
     cf.add_argument("assignments", nargs="*", help="e.g. ml=off auto_target=docx watch_folder=D:\\drop")
     cf.set_defaults(fn=cmd_config)
-
     tg = sub.add_parser("targets", help="list suggested newest targets for an extension")
     tg.add_argument("ext")
     tg.set_defaults(fn=cmd_targets)
@@ -363,7 +343,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # Explorer may pass bare file paths without a subcommand (defensive)
-    if argv and not argv[0] in {"convert", "run", "install", "uninstall", "status",
+    if argv and argv[0] not in {"convert", "run", "install", "uninstall", "status",
                                 "stats", "config", "targets", "-h", "--help"}:
         if all(Path(a).exists() or a.startswith("%") for a in argv):
             argv = ["convert"] + argv
