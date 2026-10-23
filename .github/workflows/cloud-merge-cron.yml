@@ -1,0 +1,38 @@
+name: cloud learnings merge (every 6 h)
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    env:
+      CONFAS_GIST_ID: ${{ secrets.CONFAS_GIST_ID }}
+      CONFAS_CLOUD_TOKEN: ${{ secrets.CONFAS_CLOUD_TOKEN }}
+    steps:
+      - name: Skip gracefully when the shared pool is not configured
+        if: env.CONFAS_GIST_ID == '' || env.CONFAS_CLOUD_TOKEN == ''
+        run: |
+          echo "cloud pool not configured (CONFAS_GIST_ID / CONFAS_CLOUD_TOKEN secrets not set)."
+          echo "Nothing to merge - expected until the owner creates the gist (README: Shared learnings)."
+          echo "Skipping instead of failing."
+
+      - uses: actions/checkout@v4
+        if: env.CONFAS_GIST_ID != '' && env.CONFAS_CLOUD_TOKEN != ''
+      - uses: actions/setup-python@v5
+        if: env.CONFAS_GIST_ID != '' && env.CONFAS_CLOUD_TOKEN != ''
+        with: { python-version: "3.12" }
+      - name: Install numpy
+        if: env.CONFAS_GIST_ID != '' && env.CONFAS_CLOUD_TOKEN != ''
+        run: pip install numpy
+      - name: Recompute merged.json from contrib-*.json files
+        if: env.CONFAS_GIST_ID != '' && env.CONFAS_CLOUD_TOKEN != ''
+        env:
+          CONFAS_GIST_ID: ${{ secrets.CONFAS_GIST_ID }}
+          CONFAS_CLOUD_TOKEN: ${{ secrets.CONFAS_CLOUD_TOKEN }}
+        run: PYTHONPATH=src python -m confas.cloud --merge-gist
