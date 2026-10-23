@@ -484,12 +484,18 @@ def merge_gist_worker(gist_id: Optional[str] = None, token_: Optional[str] = Non
     Used by the scheduled GitHub Action so contributors only ever PATCH their
     own file (no lost-update races on the aggregate).
     """
-        gid = gist_id or os.environ.get("CONFAS_GIST_ID") or DEFAULT_GIST_ID
+    gid = (gist_id or os.environ.get("CONFAS_GIST_ID") or "").strip()
     tok = token_ or token()
-    headers = {"Authorization": f"Bearer {tok}"} if tok else {}
+    if not gid or gid == DEFAULT_GIST_ID or not tok:
+        print("cloud pool not configured (gist id/token missing) - nothing to merge.")
+        return {"version": 1, "clock": 0, "updated": time.time(),
+                "bandit": {}, "median_ms": {}}
+    headers = {"Authorization": f"Bearer {tok}"}
     data = _request(f"{API_ROOT}/gists/{gid}", headers=headers)
     if not data:
-        raise RuntimeError(f"cannot read gist {gid}")
+        print(f"warning: cannot read gist {gid} - leaving pool untouched.")
+        return {"version": 1, "clock": 0, "updated": time.time(),
+                "bandit": {}, "median_ms": {}}
     files = data.get("files") or {}
     contribs, keep = [], {}
     for k, v in files.items():
